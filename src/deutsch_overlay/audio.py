@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from math import ceil
 from threading import Event
-from typing import Iterator
+from typing import Callable, Iterator
 
 import numpy as np
 
@@ -94,6 +94,27 @@ class LoopbackSource:
             raise AudioDeviceError("output audio capture failed") from exc
 
 
+class SileroSpeechDetector:
+    """Classify the newest frame using Silero VAD with recent audio context."""
+
+    def __init__(self, *, sample_rate: int = 16000, frame_samples: int = 1600) -> None:
+        if sample_rate != 16000 or frame_samples != 1600:
+            raise ValueError("Silero detector needs 16 kHz, 100 ms frames")
+        from faster_whisper.vad import get_vad_model
+
+        self.model = get_vad_model()
+        self._recent: deque[np.ndarray] = deque(maxlen=10)
+
+    def __call__(self, frame: np.ndarray) -> bool:
+        self._recent.append(frame)
+        audio = np.concatenate(self._recent)
+        if float(np.max(np.abs(audio))) < 0.003:
+            return False
+        audio = np.pad(audio, (0, (-len(audio)) % 512)).astype(np.float32)
+        scores = self.model(audio).reshape(-1)
+        return bool(np.max(scores[-5:]) >= 0.35)
+
+
 class SpeechSegmenter:
     """A conservative energy gate that bounds inference clip lengths."""
 
@@ -102,10 +123,11 @@ class SpeechSegmenter:
         *,
         sample_rate: int,
         frame_samples: int,
-        threshold: float = 0.015,
+        threshold: float = 0.005,
         min_speech_seconds: float = 0.2,
         silence_seconds: float = 0.4,
         max_seconds: float = 7.0,
+        voice_detector: Callable[[np.ndarray], bool] | None = None,
     ) -> None:
         if sample_rate <= 0 or frame_samples <= 0 or threshold < 0:
             raise ValueError("invalid segmenter audio parameters")
@@ -117,6 +139,7 @@ class SpeechSegmenter:
         self.min_voice_frames = ceil(min_speech_seconds * frames_per_second)
         self.quiet_frames_needed = ceil(silence_seconds * frames_per_second)
         self.max_frames = ceil(max_seconds * frames_per_second)
+        self.voice_detector = voice_detector
         self._preroll: deque[np.ndarray] = deque(maxlen=2)
         self._frames: list[np.ndarray] = []
         self._voice_frames = 0
@@ -126,7 +149,11 @@ class SpeechSegmenter:
         if frame.ndim != 1 or len(frame) != self.frame_samples:
             raise ValueError("frame must be a fixed-size mono array")
         frame = np.asarray(frame, dtype=np.float32).copy()
-        voiced = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32)))) >= self.threshold
+        voiced = (
+            self.voice_detector(frame)
+            if self.voice_detector is not None
+            else float(np.sqrt(np.mean(np.square(frame, dtype=np.float32)))) >= self.threshold
+        )
         if not self._frames:
             if not voiced:
                 self._preroll.append(frame)

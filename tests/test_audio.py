@@ -121,3 +121,28 @@ def test_segmenter_bounds_long_speech():
         outputs.extend(segmenter.push(voice))
     assert outputs
     assert len(outputs[0]) <= 16000 // 2
+
+
+def test_segmenter_accepts_quiet_playback_speech():
+    segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600)
+    voice = np.full(1600, 0.008, dtype=np.float32)
+    silence = np.zeros(1600, dtype=np.float32)
+    outputs = []
+    for frame in [voice] * 4 + [silence] * 5:
+        outputs.extend(segmenter.push(frame))
+    assert len(outputs) == 1
+
+
+def test_silero_gate_ignores_continuous_music_like_tone():
+    pytest.importorskip("faster_whisper")
+    from deutsch_overlay.audio import SileroSpeechDetector
+
+    detector = SileroSpeechDetector()
+    segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600, voice_detector=detector)
+    t = np.arange(1600, dtype=np.float32) / 16000
+    tone = 0.014 * np.sin(2 * np.pi * 440 * t)
+    outputs = []
+    for _ in range(80):
+        outputs.extend(segmenter.push(tone))
+    assert outputs == []
+    assert segmenter.flush() is None

@@ -1,4 +1,5 @@
 .venv/
+.model-venv/
 .superpowers/
 __pycache__/
 .pytest_cache/

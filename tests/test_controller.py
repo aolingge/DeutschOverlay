@@ -1,0 +1,180 @@
+import os
+import time
+import threading
+from dataclasses import replace
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import numpy as np
+import pytest
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+
+from deutsch_overlay.captions import CaptionEvent
+from deutsch_overlay.config import Settings
+from deutsch_overlay.controller import CaptionController
+from deutsch_overlay.engines.azure import OnlineUnavailable
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+class FiniteSource:
+    def __init__(self, frames):
+        self._frames = frames
+
+    def frames(self, _stop):
+        yield from self._frames
+
+
+class FakeLocalEngine:
+    warning = None
+
+    def process(self, _audio, _rate, session, segment, _lock):
+        return CaptionEvent(session, segment, "de", "Guten Tag", None, True, time.monotonic())
+
+
+def speech_frames():
+    voice = np.full(1600, 0.2, dtype=np.float32)
+    silence = np.zeros(1600, dtype=np.float32)
+    return [voice] * 3 + [silence] * 5
+
+
+def test_local_audio_reaches_caption_view(qapp):
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource(speech_frames()),
+        local_factory=FakeLocalEngine,
+        voice_detector_factory=lambda: lambda frame: float(np.mean(np.abs(frame))) > 0.01,
+    )
+    views = []
+    controller.view_changed.connect(views.append)
+    controller.start(Settings())
+    for _ in range(50):
+        QTest.qWait(20)
+        if views:
+            break
+    controller.stop()
+    assert views and views[0].primary == "Guten Tag"
+
+
+def test_old_session_event_is_ignored_after_restart(qapp):
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource([]),
+        local_factory=FakeLocalEngine,
+    )
+    views = []
+    controller.view_changed.connect(views.append)
+    controller.start(Settings())
+    old_id = controller.session_id
+    controller.start(Settings())
+    controller.accept_caption(CaptionEvent(old_id, "old", "de", "Alt", None, True, time.monotonic()))
+    assert views == []
+    controller.stop()
+
+
+def test_comparison_toggle_uses_current_caption_without_new_recognition(qapp):
+    controller = CaptionController(source_factory=lambda _device: FiniteSource([]))
+    views = []
+    controller.view_changed.connect(views.append)
+    controller.start(Settings())
+    controller.accept_caption(CaptionEvent(controller.session_id, "en", "en", "Hello", "Hallo", True, time.monotonic()))
+    controller.set_compare_original(True)
+    assert views[-1].secondary == "Hello"
+    controller.stop()
+
+
+def test_online_setup_failure_is_visible_and_capture_never_starts(qapp):
+    calls = []
+
+    class BrokenOnline:
+        def start(self, *_args):
+            raise OnlineUnavailable("Azure credentials are not configured")
+
+        def stop(self):
+            pass
+
+    controller = CaptionController(
+        source_factory=lambda _device: calls.append("capture") or FiniteSource([]),
+        online_factory=lambda _limit: BrokenOnline(),
+    )
+    statuses = []
+    controller.status_changed.connect(statuses.append)
+    controller.start(replace(Settings(), mode="online"))
+    for _ in range(50):
+        QTest.qWait(20)
+        if any("credentials" in status for status in statuses):
+            break
+    controller.stop()
+    assert calls == []
+    assert any("credentials" in status for status in statuses)
+
+
+def test_stop_sets_no_active_worker(qapp):
+    controller = CaptionController(source_factory=lambda _device: FiniteSource([]), local_factory=FakeLocalEngine)
+    controller.start(Settings())
+    controller.stop()
+    assert not controller.running
+
+
+def test_queued_caption_is_ignored_after_pause(qapp):
+    controller = CaptionController(source_factory=lambda _device: FiniteSource([]))
+    views = []
+    controller.view_changed.connect(views.append)
+    controller.start(Settings())
+    event = CaptionEvent(controller.session_id, "old", "de", "Alt", None, True, time.monotonic())
+    worker = threading.Thread(target=lambda: controller._caption_from_worker.emit(event))
+    worker.start()
+    worker.join()
+    controller.pause(True)
+    QApplication.processEvents()
+    assert views == []
+
+
+def test_stuck_worker_blocks_new_session(qapp, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingSource:
+        def frames(self, _stop):
+            entered.set()
+            release.wait(2)
+            yield np.zeros(1600, dtype=np.float32)
+
+    controller = CaptionController(source_factory=lambda _device: BlockingSource(), local_factory=FakeLocalEngine)
+    monkeypatch.setattr(controller, "STOP_JOIN_SECONDS", 0.01, raising=False)
+    try:
+        assert controller.start(Settings()) is True
+        assert entered.wait(1)
+        old_id = controller.session_id
+        assert controller.start(Settings()) is False
+        assert controller.session_id != old_id
+        assert controller.running
+    finally:
+        release.set()
+        controller.stop()
+
+
+def test_local_model_failure_is_reported_before_audio_capture(qapp):
+    calls = []
+
+    class BrokenEngine:
+        def prepare(self):
+            raise RuntimeError("model unavailable")
+
+    controller = CaptionController(
+        source_factory=lambda _device: calls.append("capture") or FiniteSource([]),
+        local_factory=BrokenEngine,
+    )
+    statuses = []
+    controller.status_changed.connect(statuses.append)
+    controller.start(Settings())
+    for _ in range(50):
+        QTest.qWait(20)
+        if any("model unavailable" in status for status in statuses):
+            break
+    controller.stop()
+    assert calls == []
+    assert any("model unavailable" in status for status in statuses)
