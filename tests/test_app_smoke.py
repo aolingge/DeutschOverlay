@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from deutsch_overlay.app import DesktopApp, startup_settings
 from deutsch_overlay.audio import OutputDevice
+from deutsch_overlay.captions import CaptionView
 from deutsch_overlay.config import Settings, load_settings, save_settings
 from deutsch_overlay.settings_window import STYLE_PRESETS, SettingsWindow
 
@@ -137,6 +138,26 @@ def test_display_mode_and_position_choices_save_without_restarting_audio(qapp, t
     runtime._save_position(25, 35)
     assert load_settings(runtime.settings_path).overlay_position == "custom"
     runtime.shutdown()
+
+
+def test_controller_caption_reaches_overlay_and_visibility_restores_last_caption(qapp, tmp_path):
+    controller = FakeController()
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=controller,
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        controller.view_changed.emit(CaptionView(1, "caption", "Guten Tag", None, True, 1.0))
+        qapp.processEvents()
+        assert runtime.overlay.isVisible()
+        assert runtime.overlay.primary_label.text() == "Guten Tag"
+        runtime.toggle_visibility()
+        assert not runtime.overlay.isVisible()
+        runtime.toggle_visibility()
+        assert runtime.overlay.isVisible()
+        assert runtime.overlay.primary_label.text() == "Guten Tag"
+    finally:
+        runtime.shutdown()
 
 
 def test_background_preset_custom_color_and_live_preview(qapp, tmp_path, monkeypatch):

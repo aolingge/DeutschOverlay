@@ -85,6 +85,7 @@ class DesktopApp:
         self._paused = False
         self._restart_pending = False
         self._locked = True
+        self._last_view: CaptionView | None = None
         self.tray = QSystemTrayIcon(_tray_icon(), self.window)
         self.tray.setToolTip("Deutsch Overlay")
         self._build_tray()
@@ -127,6 +128,7 @@ class DesktopApp:
         self._restart_pending = self.controller.start(self.settings) is False
 
     def _show_view(self, view: CaptionView) -> None:
+        self._last_view = view
         if self._visible and not self._paused:
             self.overlay.show_caption(view)
 
@@ -148,6 +150,7 @@ class DesktopApp:
         )
         if (pipeline_changed or self._restart_pending) and not self._paused:
             self.overlay.hide_caption()
+            self._last_view = None
             self._restart_pending = self.controller.start(updated) is False
         elif not pipeline_changed and not self._restart_pending:
             self.window.set_status("设置已保存")
@@ -168,6 +171,8 @@ class DesktopApp:
         self._visible = not self._visible
         if not self._visible:
             self.overlay.hide_caption()
+        elif not self._paused and self._last_view is not None:
+            self.overlay.show_caption(self._last_view)
         self.window.set_status("字幕已显示" if self._visible else "字幕已隐藏")
 
     def cycle_language(self) -> None:
@@ -179,6 +184,7 @@ class DesktopApp:
         self._paused = not self._paused
         if self._paused:
             self.overlay.hide_caption()
+            self._last_view = None
             self.controller.pause(True)
         else:
             self._restart_pending = self.controller.start(self.settings) is False
