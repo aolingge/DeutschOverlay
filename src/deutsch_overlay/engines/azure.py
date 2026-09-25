@@ -8,8 +8,7 @@ import tempfile
 import time
 from datetime import date
 from pathlib import Path
-from threading import Lock
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import Callable
 
 import numpy as np
@@ -23,6 +22,26 @@ class OnlineUnavailable(RuntimeError):
 
 class OnlineLimitReached(RuntimeError):
     """The application-level daily online audio cap was reached."""
+
+
+def wait_for_sdk_future(future, timeout_seconds: float) -> None:
+    """Bound SDK ResultFuture.get(), which offers no timeout argument."""
+    finished = Event()
+    outcome: list[BaseException] = []
+
+    def receive() -> None:
+        try:
+            future.get()
+        except BaseException as exc:
+            outcome.append(exc)
+        finally:
+            finished.set()
+
+    Thread(target=receive, name="Azure SDK wait", daemon=True).start()
+    if not finished.wait(timeout_seconds):
+        raise OnlineUnavailable("Azure SDK operation timed out")
+    if outcome:
+        raise outcome[0]
 
 
 class OnlineBudget:
@@ -173,7 +192,7 @@ class AzureEngine:
             self._recognizer.recognizing.connect(self._recognizing)
         self._recognizer.canceled.connect(self._canceled)
         try:
-            self._recognizer.start_continuous_recognition_async().get()
+            wait_for_sdk_future(self._recognizer.start_continuous_recognition_async(), 10)
         except Exception as exc:
             self.stop()
             raise OnlineUnavailable("Azure recognition could not start") from exc
@@ -239,14 +258,17 @@ class AzureEngine:
                 self._on_error("在线识别已中断，请检查网络或 Azure 服务状态")
 
     def stop(self) -> None:
-        was_active = self._active
         self._active = False
+        self._interrupted.set()
         self._partial_segment_id = None
-        if was_active and self._recognizer is not None:
+        recognizer, stream = self._recognizer, self._stream
+        self._recognizer = None
+        self._stream = None
+        if recognizer is not None:
             try:
-                self._recognizer.stop_continuous_recognition_async().get()
+                wait_for_sdk_future(recognizer.stop_continuous_recognition_async(), 2)
             except Exception:
                 pass
-        if self._stream is not None and hasattr(self._stream, "close"):
-            self._stream.close()
+        if stream is not None and hasattr(stream, "close"):
+            stream.close()
         self.budget.close()

@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
+import ctypes
 from dataclasses import dataclass
 from math import ceil
 from threading import Event
 from time import monotonic
 from typing import Callable, Iterator
+import sys
 
 import numpy as np
 
 
 class AudioDeviceError(RuntimeError):
     """The selected playback device cannot currently be captured."""
+
+
+class AudioFormatError(AudioDeviceError):
+    """The capture backend returned audio that cannot be interpreted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,17 +60,58 @@ def _soundcard():
     return soundcard
 
 
+@contextmanager
+def _windows_com_apartment():
+    """SoundCard initializes COM at import, but capture uses another thread."""
+    if sys.platform != "win32":
+        yield
+        return
+    ole32 = ctypes.WinDLL("ole32")
+    ole32.CoInitializeEx.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+    ole32.CoInitializeEx.restype = ctypes.c_long
+    ole32.CoUninitialize.argtypes = ()
+    result = ole32.CoInitializeEx(None, 0)  # COINIT_MULTITHREADED
+    if result not in (0, 1, -2147417850):  # S_OK, S_FALSE, RPC_E_CHANGED_MODE
+        raise AudioDeviceError(f"Windows audio initialization failed: {result & 0xffffffff:#x}")
+    try:
+        yield
+    finally:
+        if result in (0, 1):
+            ole32.CoUninitialize()
+
+
 def list_output_devices(backend=None) -> list[OutputDevice]:
     backend = backend or _soundcard()
-    try:
-        default = backend.default_speaker()
-        default_id = default.id if default is not None else None
-        return [
-            OutputDevice(str(speaker.id), speaker.name, speaker.id == default_id)
-            for speaker in backend.all_speakers()
-        ]
-    except (OSError, RuntimeError) as exc:
-        raise AudioDeviceError("output devices could not be listed") from exc
+    with _windows_com_apartment():
+        try:
+            default = backend.default_speaker()
+            default_id = default.id if default is not None else None
+            return [
+                OutputDevice(str(speaker.id), speaker.name, speaker.id == default_id)
+                for speaker in backend.all_speakers()
+            ]
+        except (OSError, RuntimeError) as exc:
+            raise AudioDeviceError("output devices could not be listed") from exc
+
+
+def _downmix(raw: np.ndarray) -> np.ndarray:
+    if raw.ndim == 1:
+        return raw
+    if raw.ndim != 2 or raw.shape[1] == 0:
+        raise AudioFormatError("capture returned an unsupported audio format")
+    if not len(raw):
+        return np.empty(0, dtype=np.float32)
+    channel_rms = np.sqrt(np.mean(np.square(raw, dtype=np.float32), axis=0))
+    loudest = int(np.argmax(channel_rms))
+    active = channel_rms >= max(1e-7, float(channel_rms[loudest]) * 0.001)
+    if not np.any(active):
+        return np.zeros(len(raw), dtype=np.float32)
+    channels = raw[:, active]
+    reference = raw[:, loudest]
+    denominator = channel_rms[active] * channel_rms[loudest] + 1e-12
+    correlation = np.mean(channels * reference[:, None], axis=0) / denominator
+    signs = np.where(correlation < -0.9, -1.0, 1.0).astype(np.float32)
+    return np.mean(channels * signs, axis=1, dtype=np.float32)
 
 
 class LoopbackSource:
@@ -79,25 +127,46 @@ class LoopbackSource:
         sample_rate: int = 16000,
         frame_samples: int = 1600,
         device_check_frames: int = 20,
+        retry_forever: bool = False,
+        retry_interval: float = 0.5,
+        on_status: Callable[[str], None] | None = None,
     ) -> None:
-        if sample_rate <= 0 or frame_samples <= 0 or device_check_frames <= 0:
+        if sample_rate <= 0 or frame_samples <= 0 or device_check_frames <= 0 or retry_interval <= 0:
             raise ValueError("audio frame and device check intervals must be positive")
         self.device_id = device_id
         self.backend = backend
         self.sample_rate = sample_rate
         self.frame_samples = frame_samples
         self.device_check_frames = device_check_frames
+        self.retry_forever = retry_forever
+        self.retry_interval = retry_interval
+        self.on_status = on_status
+        self._last_notice: str | None = None
         self.active_device: OutputDevice | None = None
         self.capture_generation = 0
 
+    def _wait_for_device(self, stop_event: Event, message: str) -> None:
+        if message != self._last_notice:
+            self._last_notice = message
+            if self.on_status is not None:
+                self.on_status(message)
+        stop_event.wait(self.retry_interval)
+
     def frames(self, stop_event: Event) -> Iterator[np.ndarray]:
         backend = self.backend or _soundcard()
+        with _windows_com_apartment():
+            yield from self._frames_with_com(stop_event, backend)
+
+    def _frames_with_com(self, stop_event: Event, backend) -> Iterator[np.ndarray]:
         missing_since: float | None = None
         capture_error_since: float | None = None
         while not stop_event.is_set():
             try:
                 devices = list_output_devices(backend)
             except AudioDeviceError:
+                if self.retry_forever:
+                    self._wait_for_device(stop_event, "暂时无法读取播放设备，正在重试")
+                    continue
                 if self.device_id is not None or self.active_device is None:
                     raise
                 devices = []
@@ -107,6 +176,13 @@ class LoopbackSource:
                 (device for device in devices if device.is_default), None
             )
             if selected is None:
+                if self.retry_forever:
+                    message = (
+                        "所选播放设备暂时不可用，正在等待重新连接"
+                        if self.device_id is not None else "等待系统默认播放设备连接"
+                    )
+                    self._wait_for_device(stop_event, message)
+                    continue
                 if self.device_id is None and self.active_device is not None:
                     missing_since = missing_since or monotonic()
                     if monotonic() - missing_since < self.RECONNECT_SECONDS:
@@ -117,10 +193,20 @@ class LoopbackSource:
             try:
                 for frame in self._capture_selected(backend, selected, stop_event):
                     capture_error_since = None
+                    self._last_notice = None
                     yield frame
             except (AudioDeviceError, OSError, RuntimeError, ValueError, TypeError) as exc:
                 if stop_event.is_set():
                     return
+                if isinstance(exc, AudioFormatError):
+                    raise
+                if isinstance(exc, RuntimeError) and "unsupported format" in str(exc).lower():
+                    raise AudioFormatError("选定播放设备的音频格式不受支持 (unsupported format)") from exc
+                if isinstance(exc, (ValueError, TypeError)):
+                    raise AudioDeviceError("output audio capture failed") from exc
+                if self.retry_forever:
+                    self._wait_for_device(stop_event, "电脑声音采集暂时中断，正在重新连接")
+                    continue
                 if self.device_id is None:
                     capture_error_since = capture_error_since or monotonic()
                     if monotonic() - capture_error_since < self.RECONNECT_SECONDS:
@@ -141,12 +227,7 @@ class LoopbackSource:
             self.capture_generation += 1
             while not stop_event.is_set():
                 raw = np.asarray(recorder.record(numframes=self.frame_samples), dtype=np.float32)
-                if raw.ndim == 2:
-                    mono = raw.mean(axis=1, dtype=np.float32)
-                elif raw.ndim == 1:
-                    mono = raw
-                else:
-                    raise AudioDeviceError("capture returned an unsupported audio format")
+                mono = _downmix(raw)
                 if not len(mono):
                     continue
                 pending = np.concatenate((pending, mono))

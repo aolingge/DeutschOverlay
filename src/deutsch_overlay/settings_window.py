@@ -49,6 +49,7 @@ class SettingsWindow(QWidget):
     refresh_devices_requested = Signal()
     reset_position_requested = Signal()
     preview_requested = Signal(object)
+    exit_requested = Signal()
 
     def __init__(self, settings: Settings, devices: list[OutputDevice]) -> None:
         super().__init__()
@@ -56,14 +57,12 @@ class SettingsWindow(QWidget):
         self.setWindowTitle("Deutsch Overlay · 设置")
         self.resize(520, 650)
         self._updating_style = False
+        self.close_exits = False
+        self._devices = list(devices)
         form = QFormLayout()
 
         self.device_combo = QComboBox()
-        self.device_combo.addItem("系统默认播放设备", None)
-        for device in devices:
-            self.device_combo.addItem(device.name, device.id)
-        selected = self.device_combo.findData(settings.output_device_id)
-        self.device_combo.setCurrentIndex(max(0, selected))
+        self._set_devices(self._devices, settings.output_device_id)
         refresh_button = QPushButton("刷新")
         refresh_button.clicked.connect(self.refresh_devices_requested.emit)
         device_row = QHBoxLayout()
@@ -278,12 +277,10 @@ class SettingsWindow(QWidget):
 
     def _apply(self) -> None:
         settings = self._candidate_settings()
-        self._settings = settings
         self.settings_changed.emit(settings)
 
     def _apply_and_preview(self) -> None:
         settings = self._candidate_settings()
-        self._settings = settings
         self.preview_requested.emit(settings)
 
     def _submit_credentials(self) -> None:
@@ -299,13 +296,13 @@ class SettingsWindow(QWidget):
         if level is None:
             self.audio_level_label.setText("等待声音采集")
         elif level < 0.003:
-            self.audio_level_label.setText("未检测到电脑播放声；播放视频后仍如此，请检查播放设备和系统音量")
+            self.audio_level_label.setText("未检测到电脑播放声；请检查播放设备、Windows 音量混合器中的应用输出和系统音量")
         else:
             self.audio_level_label.setText("正在接收电脑播放声")
 
     def update_settings(self, settings: Settings) -> None:
         self._settings = settings
-        self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(settings.output_device_id)))
+        self._set_devices(self._devices, settings.output_device_id)
         self.mode_combo.setCurrentIndex(self.mode_combo.findData(settings.mode))
         self.language_combo.setCurrentIndex(self.language_combo.findData(settings.language_lock))
         self.subtitle_combo.setCurrentIndex(self.subtitle_combo.findData(settings.compare_original))
@@ -328,8 +325,24 @@ class SettingsWindow(QWidget):
 
     def replace_devices(self, devices: list[OutputDevice]) -> None:
         selected = self.device_combo.currentData()
+        self._devices = list(devices)
+        self._set_devices(self._devices, selected)
+
+    def _set_devices(self, devices: list[OutputDevice], selected: str | None) -> None:
         self.device_combo.clear()
         self.device_combo.addItem("系统默认播放设备", None)
         for device in devices:
             self.device_combo.addItem(device.name, device.id)
-        self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(selected)))
+        index = self.device_combo.findData(selected)
+        if index < 0 and selected is not None:
+            self.device_combo.addItem("已选播放设备（暂不可用，等待重新连接）", selected)
+            index = self.device_combo.count() - 1
+            self.device_combo.setItemData(index, selected, 3)
+        self.device_combo.setCurrentIndex(max(0, index))
+
+    def closeEvent(self, event) -> None:
+        if self.close_exits:
+            event.ignore()
+            self.exit_requested.emit()
+            return
+        super().closeEvent(event)

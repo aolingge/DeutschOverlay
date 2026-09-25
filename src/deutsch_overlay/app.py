@@ -8,7 +8,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -20,6 +20,7 @@ from deutsch_overlay.credentials import AzureCredentialStore
 from deutsch_overlay.hotkeys import HotkeyService
 from deutsch_overlay.overlay import CaptionOverlay
 from deutsch_overlay.settings_window import SettingsWindow
+from deutsch_overlay.single_instance import SingleInstance
 
 
 def default_settings_path() -> Path:
@@ -30,6 +31,37 @@ def default_settings_path() -> Path:
 def startup_settings(saved: Settings) -> Settings:
     """Require a fresh user action for each potentially billed cloud session."""
     return replace(saved, mode="local") if saved.mode == "online" else saved
+
+
+def audio_self_test(*, source=None, timeout_seconds: float = 5.0) -> tuple[int, str]:
+    """Check that this build can open a Windows loopback recorder."""
+    import threading
+    import numpy as np
+    from deutsch_overlay.audio import LoopbackSource
+
+    stop = threading.Event()
+    result = {}
+    source = source if source is not None else LoopbackSource()
+
+    def capture() -> None:
+        try:
+            frame = next(source.frames(stop))
+            device = source.active_device
+            result["message"] = (
+                f"音频回采已连接：{device.name if device else '播放设备'}；"
+                f"首帧峰值 {float(np.max(np.abs(frame))):.4f}（无播放时可为 0）"
+            )
+        except Exception as exc:
+            result["message"] = f"音频回采失败：{type(exc).__name__}: {exc}"
+
+    worker = threading.Thread(target=capture, name="audio-self-test", daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
+    stop.set()
+    if worker.is_alive():
+        return 2, "音频回采超时，请检查播放设备和 Windows 音频服务"
+    message = result.get("message", "音频回采没有返回结果")
+    return (1 if message.startswith("音频回采失败") else 0), message
 
 
 def _tray_icon() -> QIcon:
@@ -85,9 +117,11 @@ class DesktopApp:
         self._visible = True
         self._paused = False
         self._restart_pending = False
+        self._restart_scheduled = False
         self._locked = True
         self._last_view: CaptionView | None = None
         self._last_view_received_at: float | None = None
+        self._shutting_down = False
         self.tray = QSystemTrayIcon(_tray_icon(), self.window)
         self.tray.setToolTip("Deutsch Overlay")
         self._build_tray()
@@ -120,15 +154,39 @@ class DesktopApp:
         self.window.refresh_devices_requested.connect(self.refresh_devices)
         self.window.reset_position_requested.connect(self.reset_position)
         self.window.preview_requested.connect(self.apply_and_preview)
+        self.window.exit_requested.connect(self.shutdown)
         self.overlay.moved.connect(self._save_position)
         self.hotkeys.action.connect(self._hotkey_action)
         self.hotkeys.failed.connect(self.window.set_status)
 
     def start(self) -> None:
-        self.tray.show()
+        tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+        self.window.close_exits = not tray_available
+        if tray_available:
+            self.tray.show()
         self.window.show()
         self.hotkeys.start()
+        self._start_pipeline()
+
+    def _start_pipeline(self) -> None:
+        if self._restart_pending and getattr(self.controller, "running", False):
+            self._schedule_restart()
+            return
         self._restart_pending = self.controller.start(self.settings) is False
+        if self._restart_pending:
+            self.window.set_status("正在等待上一段识别会话退出；退出后会自动继续")
+            self._schedule_restart()
+
+    def _schedule_restart(self) -> None:
+        if not self._restart_scheduled:
+            self._restart_scheduled = True
+            QTimer.singleShot(250, self._retry_pending_start)
+
+    def _retry_pending_start(self) -> None:
+        self._restart_scheduled = False
+        if self._shutting_down or self._paused or not self._restart_pending:
+            return
+        self._start_pipeline()
 
     def _show_view(self, view: CaptionView) -> None:
         if (self._last_view is None or
@@ -171,7 +229,7 @@ class DesktopApp:
             self.overlay.hide_caption()
             self._last_view = None
             self._last_view_received_at = None
-            self._restart_pending = self.controller.start(updated) is False
+            self._start_pipeline()
         elif not pipeline_changed and not self._restart_pending:
             self.window.set_status("设置已保存")
         return True
@@ -215,7 +273,7 @@ class DesktopApp:
             self._last_view_received_at = None
             self.controller.pause(True)
         else:
-            self._restart_pending = self.controller.start(self.settings) is False
+            self._start_pipeline()
 
     def toggle_lock(self) -> None:
         self._locked = not self._locked
@@ -281,15 +339,31 @@ class DesktopApp:
             callback()
 
     def shutdown(self) -> None:
+        if self._shutting_down:
+            return
+        self._shutting_down = True
         self.hotkeys.stop()
         self.controller.stop()
         self.tray.hide()
         self.overlay.close()
+        self.window.close_exits = False
         self.window.close()
+        self.window.hide()
         self.application.quit()
+
+    def show_settings(self) -> None:
+        self.window.showNormal()
+        self.window.raise_()
+        self.window.activateWindow()
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--audio-self-test"]:
+        code, message = audio_self_test()
+        report = os.environ.get("DEUTSCH_OVERLAY_SELF_TEST_REPORT")
+        if report:
+            Path(report).write_text(message + "\n", encoding="utf-8")
+        sys.exit(code)
     if sys.argv[1:] == ["--self-test"]:
         from deutsch_overlay.audio import SileroSpeechDetector
         from deutsch_overlay.engines.local import LocalEngine
@@ -305,9 +379,18 @@ def main() -> None:
         sys.exit(0)
     application = QApplication(sys.argv)
     application.setApplicationName("Deutsch Overlay")
-    runtime = DesktopApp(application)
-    runtime.start()
-    sys.exit(application.exec())
+    runtime = None
+    guard = SingleInstance("DeutschOverlay.settings", lambda: runtime.show_settings())
+    if not guard.listen():
+        if not guard.notify_existing():
+            QMessageBox.warning(None, "Deutsch Overlay", "程序已经在运行，但暂时无法打开现有设置窗口。")
+        return
+    try:
+        runtime = DesktopApp(application)
+        runtime.start()
+        sys.exit(application.exec())
+    finally:
+        guard.close()
 
 
 if __name__ == "__main__":

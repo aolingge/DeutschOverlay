@@ -18,6 +18,7 @@ if (-not $NoBuild) {
     $arguments = @(
         '-m', 'PyInstaller', '--noconfirm', '--onedir', '--windowed',
         '--name', 'DeutschOverlay', '--paths', (Join-Path $projectRoot 'src'),
+        '--version-file', (Join-Path $PSScriptRoot 'version_info.txt'),
         '--collect-data', 'faster_whisper',
         '--collect-submodules', 'transformers.models.marian',
         '--collect-all', 'azure.cognitiveservices.speech',

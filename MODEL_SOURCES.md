@@ -4,8 +4,8 @@
 
 | 目录 | 上游模型 | 模型许可 |
 | --- | --- | --- |
-| `whisper-small` | [Systran/faster-whisper-small](https://huggingface.co/Systran/faster-whisper-small)，由 OpenAI Whisper small 转换 | MIT |
-| `opus-en-de` | [Helsinki-NLP/opus-mt-en-de](https://huggingface.co/Helsinki-NLP/opus-mt-en-de) | CC BY 4.0 |
-| `opus-zh-de` | [Helsinki-NLP/opus-mt-zh-de](https://huggingface.co/Helsinki-NLP/opus-mt-zh-de) | Apache 2.0 |
+| `whisper-small` | [Systran/faster-whisper-small](https://huggingface.co/Systran/faster-whisper-small)，由 OpenAI Whisper small 转换 | [MIT](https://huggingface.co/Systran/faster-whisper-small/blob/main/README.md) |
+| `opus-en-de` | [Helsinki-NLP/opus-mt-en-de](https://huggingface.co/Helsinki-NLP/opus-mt-en-de)，Jörg Tiedemann、Santhosh Thottingal | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+| `opus-zh-de` | [Helsinki-NLP/opus-mt-zh-de](https://huggingface.co/Helsinki-NLP/opus-mt-zh-de) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) |
 
 模型提供方、许可和限制以各上游模型卡为准。英文、中文到德语的模型文件由原始模型转换为 CTranslate2 格式，翻译内容应结合上下文核对。

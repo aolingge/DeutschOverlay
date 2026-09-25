@@ -32,7 +32,7 @@ def _online_engine(limit_minutes: int) -> AzureEngine:
 
 
 class CaptionController(QObject):
-    STOP_JOIN_SECONDS = 3.0
+    STOP_JOIN_SECONDS = 1.0
     LOCAL_PREVIEW_FRAMES = 20
     view_changed = Signal(object)
     status_changed = Signal(str)
@@ -43,7 +43,7 @@ class CaptionController(QObject):
 
     def __init__(self, *, source_factory=None, local_factory=None, online_factory=None, voice_detector_factory=None) -> None:
         super().__init__()
-        self.source_factory = source_factory or (lambda device: LoopbackSource(device))
+        self.source_factory = source_factory or (lambda device: LoopbackSource(device, retry_forever=True))
         self.local_factory = local_factory or LocalEngine
         self.online_factory = online_factory or _online_engine
         self.voice_detector_factory = voice_detector_factory or SileroSpeechDetector
@@ -127,6 +127,16 @@ class CaptionController(QObject):
         if session_id == self._generation:
             self.level_changed.emit(level)
 
+    def _source_for_session(self, device_id: str | None, session_id: int):
+        source = self.source_factory(device_id)
+        if isinstance(source, LoopbackSource):
+            def report_wait(message: str) -> None:
+                self._level_from_worker.emit(session_id, None)
+                self._status_from_worker.emit(session_id, message)
+
+            source.on_status = report_wait
+        return source
+
     def _run_local(self, session_id: int, settings: Settings, stop: threading.Event) -> None:
         clips: queue.Queue[tuple[str, object, bool, int]] = queue.Queue(maxsize=4)
         capture_done = threading.Event()
@@ -208,7 +218,7 @@ class CaptionController(QObject):
             listening = False
             active_id = None
             active_generation = None
-            source = self.source_factory(settings.output_device_id)
+            source = self._source_for_session(settings.output_device_id, session_id)
             for frame in source.frames(stop):
                 if stop.is_set():
                     break
@@ -283,7 +293,7 @@ class CaptionController(QObject):
             listening = False
             active_id = None
             active_generation = None
-            source = self.source_factory(settings.output_device_id)
+            source = self._source_for_session(settings.output_device_id, session_id)
             for frame in source.frames(stop):
                 if stop.is_set():
                     break

@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
-from deutsch_overlay.app import DesktopApp, startup_settings
+from deutsch_overlay.app import DesktopApp, audio_self_test, startup_settings
 from deutsch_overlay.audio import OutputDevice
 from deutsch_overlay.captions import CaptionView
 from deutsch_overlay.config import Settings, load_settings, save_settings
@@ -66,6 +66,39 @@ class FakeCredentials:
 
 def test_startup_does_not_auto_resume_paid_mode():
     assert startup_settings(Settings(mode="online")).mode == "local"
+
+
+def test_audio_self_test_checks_packaged_capture_without_requiring_playback():
+    import numpy as np
+
+    class Source:
+        active_device = OutputDevice("speaker", "Headset", True)
+
+        def frames(self, _stop):
+            yield np.zeros(1600, dtype=np.float32)
+
+    code, report = audio_self_test(source=Source())
+    assert code == 0
+    assert "Headset" in report
+
+
+def test_audio_self_test_times_out_when_capture_backend_stalls():
+    from threading import Event
+
+    released = Event()
+
+    class StalledSource:
+        def frames(self, stop):
+            released.wait(1)
+            if not stop.is_set():
+                yield None
+
+    try:
+        code, report = audio_self_test(source=StalledSource(), timeout_seconds=0.02)
+        assert code != 0
+        assert "超时" in report
+    finally:
+        released.set()
 
 
 def test_apply_settings_persists_and_restarts_only_pipeline_changes(qapp, tmp_path):
@@ -138,6 +171,43 @@ def test_device_refresh_and_reset_position(qapp, tmp_path, monkeypatch):
     assert runtime.settings.overlay_x is None and runtime.settings.overlay_y is None
     assert runtime.settings.overlay_position == "bottom-center"
     runtime.shutdown()
+
+
+def test_missing_saved_output_stays_selected_until_user_changes_it(qapp, tmp_path):
+    path = tmp_path / "settings.json"
+    save_settings(path, Settings(output_device_id="unplugged-headset"))
+    runtime = DesktopApp(
+        qapp, settings_path=path, controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        combo = runtime.window.device_combo
+        assert combo.currentData() == "unplugged-headset"
+        assert "不可用" in combo.currentText()
+        runtime.window.replace_devices([OutputDevice("other", "Speakers", True)])
+        assert combo.currentData() == "unplugged-headset"
+        runtime.window._apply()
+        assert load_settings(path).output_device_id == "unplugged-headset"
+        runtime.window.replace_devices([OutputDevice("unplugged-headset", "Headset", True)])
+        assert combo.currentData() == "unplugged-headset"
+        assert combo.currentText() == "Headset"
+    finally:
+        runtime.shutdown()
+
+
+def test_missing_tray_closing_settings_exits_cleanly(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr("deutsch_overlay.app.QSystemTrayIcon.isSystemTrayAvailable", lambda: False)
+    controller = FakeController()
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=controller,
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    runtime.start()
+    assert runtime.window.isVisible()
+    runtime.window.close()
+    qapp.processEvents()
+    assert controller.stopped >= 1
+    assert not runtime.window.isVisible()
 
 
 def test_display_mode_and_position_choices_save_without_restarting_audio(qapp, tmp_path):
@@ -313,7 +383,26 @@ def test_failed_save_does_not_show_misleading_style_preview(qapp, tmp_path, monk
     runtime.window._apply_and_preview()
     assert not runtime.overlay.isVisible()
     assert "保存失败" in runtime.window.status_label.text()
+    assert runtime.window._settings == runtime.settings
     runtime.shutdown()
+
+
+def test_failed_apply_keeps_saved_position_as_candidate_baseline(qapp, tmp_path, monkeypatch):
+    path = tmp_path / "settings.json"
+    save_settings(path, Settings(overlay_x=31, overlay_y=53, overlay_position="custom"))
+    runtime = DesktopApp(
+        qapp, settings_path=path, controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        monkeypatch.setattr("deutsch_overlay.app.save_settings", lambda *_args: (_ for _ in ()).throw(OSError()))
+        runtime.window.font_spin.setValue(35)
+        runtime.window._apply()
+        assert runtime.window._settings == load_settings(path)
+        assert runtime.window._candidate_settings().overlay_x == 31
+        assert runtime.window._candidate_settings().overlay_y == 53
+    finally:
+        runtime.shutdown()
 
 
 def test_every_background_preset_reaches_saved_settings(qapp):
@@ -347,3 +436,67 @@ def test_same_settings_retry_after_previous_worker_blocks_restart(qapp, tmp_path
     runtime.apply_settings(updated)
     assert len(controller.started) == 2
     runtime.shutdown()
+
+
+def test_pending_pipeline_restart_runs_after_old_worker_exits(qapp, tmp_path):
+    from PySide6.QtTest import QTest
+
+    class SlowShutdownController(FakeController):
+        running = True
+
+        def start(self, settings):
+            super().start(settings)
+            return not self.running
+
+    controller = SlowShutdownController()
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=controller,
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.apply_settings(replace(runtime.settings, mode="online"))
+        assert runtime._restart_pending
+        assert len(controller.started) == 1
+        QTest.qWait(300)
+        assert len(controller.started) == 1
+        controller.running = False
+        for _ in range(20):
+            QTest.qWait(50)
+            if not runtime._restart_pending:
+                break
+        assert not runtime._restart_pending
+        assert len(controller.started) == 2
+        assert controller.started[-1].mode == "online"
+    finally:
+        runtime.shutdown()
+
+
+def test_pending_online_restart_uses_latest_local_choice(qapp, tmp_path):
+    from PySide6.QtTest import QTest
+
+    class SlowShutdownController(FakeController):
+        running = True
+
+        def start(self, settings):
+            super().start(settings)
+            return not self.running
+
+    controller = SlowShutdownController()
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=controller,
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.apply_settings(replace(runtime.settings, mode="online"))
+        runtime.apply_settings(replace(runtime.settings, mode="local", language_lock="de"))
+        controller.running = False
+        for _ in range(20):
+            QTest.qWait(50)
+            if not runtime._restart_pending:
+                break
+        assert not runtime._restart_pending
+        assert controller.started[-1].mode == "local"
+        assert controller.started[-1].language_lock == "de"
+        assert len(controller.started) == 2
+    finally:
+        runtime.shutdown()

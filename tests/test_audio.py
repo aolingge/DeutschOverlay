@@ -1,4 +1,5 @@
-from threading import Event
+from threading import Event, Thread, Timer
+import time
 
 import numpy as np
 import pytest
@@ -88,6 +89,49 @@ def test_source_resolves_selected_device_and_converts_stereo_to_mono():
     assert frame.shape == (1600,)
     assert frame.dtype == np.float32
     assert np.allclose(frame, 1)
+
+
+def test_loopback_preserves_phase_inverted_stereo_speech():
+    stereo = np.column_stack((
+        np.full(1600, 0.2, dtype=np.float32),
+        np.full(1600, -0.2, dtype=np.float32),
+    ))
+    frames = LoopbackSource(backend=FakeBackend(FakeRecorder(stereo))).frames(Event())
+    try:
+        assert np.max(np.abs(next(frames))) == pytest.approx(0.2)
+    finally:
+        frames.close()
+
+
+def test_loopback_preserves_center_only_surround_speech():
+    surround = np.zeros((1600, 6), dtype=np.float32)
+    surround[:, 2] = 0.12
+    frames = LoopbackSource(backend=FakeBackend(FakeRecorder(surround))).frames(Event())
+    try:
+        assert np.max(np.abs(next(frames))) == pytest.approx(0.12)
+    finally:
+        frames.close()
+
+
+def test_surround_downmix_keeps_quiet_center_speech_under_loud_background():
+    surround = np.full((1600, 6), 0.2, dtype=np.float32)
+    surround[:, 2] = np.tile(np.array([0.01, -0.01], dtype=np.float32), 800)
+    frames = LoopbackSource(backend=FakeBackend(FakeRecorder(surround))).frames(Event())
+    try:
+        mono = next(frames)
+        assert float(np.std(mono)) > 0.001
+    finally:
+        frames.close()
+
+
+def test_surround_downmix_does_not_dilute_center_voice_with_noise_floor():
+    surround = np.full((1600, 6), 0.00001, dtype=np.float32)
+    surround[:, 2] = np.tile(np.array([0.012, -0.012], dtype=np.float32), 800)
+    frames = LoopbackSource(backend=FakeBackend(FakeRecorder(surround))).frames(Event())
+    try:
+        assert float(np.max(np.abs(next(frames)))) > 0.003
+    finally:
+        frames.close()
 
 
 def test_default_loopback_follows_output_device_change():
@@ -241,6 +285,109 @@ def test_default_loopback_reports_persistent_capture_failure():
     source.RECONNECT_SECONDS = 0.05
     with pytest.raises(AudioDeviceError, match="capture failed"):
         next(source.frames(Event()))
+
+
+def test_recovering_loopback_waits_for_default_device_and_reports_state():
+    class LaterBackend(FakeBackend):
+        probes = 0
+
+        def default_speaker(self):
+            self.probes += 1
+            return None if self.probes < 7 else self.speakers[0]
+
+        def all_speakers(self):
+            return [] if self.probes < 7 else self.speakers
+
+    statuses = []
+    source = LoopbackSource(
+        backend=LaterBackend(), retry_forever=True, retry_interval=0.01,
+        on_status=statuses.append,
+    )
+    source.RECONNECT_SECONDS = 0.02
+    frames = source.frames(Event())
+    try:
+        assert float(next(frames)[0]) == 1
+    finally:
+        frames.close()
+    assert len(statuses) == 1
+    assert "等待" in statuses[0]
+
+
+def test_recovering_loopback_keeps_manually_selected_device():
+    class LaterBackend(FakeBackend):
+        probes = 0
+
+        def default_speaker(self):
+            self.probes += 1
+            return self.speakers[1]
+
+        def all_speakers(self):
+            return [] if self.probes < 4 else self.speakers
+
+    backend = LaterBackend()
+    source = LoopbackSource("one", backend=backend, retry_forever=True, retry_interval=0.01)
+    frames = source.frames(Event())
+    try:
+        assert float(next(frames)[0]) == 1
+    finally:
+        frames.close()
+    assert backend.selected_id == "one"
+
+
+def test_recovering_loopback_can_stop_while_no_device_exists():
+    class MissingBackend(FakeBackend):
+        def default_speaker(self):
+            return None
+
+        def all_speakers(self):
+            return []
+
+    stop = Event()
+    source = LoopbackSource(backend=MissingBackend(), retry_forever=True, retry_interval=0.5)
+    finished = Event()
+
+    def consume():
+        assert list(source.frames(stop)) == []
+        finished.set()
+
+    worker = Thread(target=consume)
+    worker.start()
+    time.sleep(0.03)
+    stop.set()
+    worker.join(timeout=0.5)
+    assert finished.is_set()
+
+
+def test_recovering_loopback_does_not_retry_invalid_audio_format():
+    class BadFormatRecorder(FakeRecorder):
+        calls = 0
+
+        def record(self, numframes):
+            self.calls += 1
+            return np.ones((numframes, 2, 2), dtype=np.float32)
+
+    recorder = BadFormatRecorder()
+    source = LoopbackSource(
+        backend=FakeBackend(recorder),
+        retry_forever=True, retry_interval=0.01,
+    )
+    with pytest.raises(AudioDeviceError, match="unsupported audio format"):
+        next(source.frames(Event()))
+    assert recorder.calls == 1
+
+
+def test_recovering_loopback_reports_backend_unsupported_format_instead_of_looping():
+    recorder = FakeRecorder(error=RuntimeError("unsupported format"))
+    source = LoopbackSource(backend=FakeBackend(recorder), retry_forever=True, retry_interval=0.001)
+    stop = Event()
+    timer = Timer(0.05, stop.set)
+    timer.start()
+    try:
+        with pytest.raises(AudioDeviceError, match="unsupported format"):
+            next(source.frames(stop))
+    finally:
+        stop.set()
+        timer.join()
 
 
 def test_default_loopback_waits_for_temporary_missing_default():

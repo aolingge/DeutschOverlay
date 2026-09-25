@@ -10,7 +10,7 @@ import pytest
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from deutsch_overlay.audio import OutputDevice
+from deutsch_overlay.audio import LoopbackSource, OutputDevice
 from deutsch_overlay.captions import CaptionEvent
 from deutsch_overlay.config import Settings
 from deutsch_overlay.controller import CaptionController
@@ -59,6 +59,71 @@ def test_local_audio_reaches_caption_view(qapp):
             break
     controller.stop()
     assert views and views[0].primary == "Guten Tag"
+
+
+def test_default_source_waits_for_missing_device_then_reports_listening(qapp):
+    class Speaker:
+        id = "later"
+        name = "Reconnected headset"
+
+    class Recorder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def record(self, numframes):
+            time.sleep(0.01)
+            return np.zeros((numframes, 2), dtype=np.float32)
+
+    class Backend:
+        ready = False
+
+        def default_speaker(self):
+            return Speaker() if self.ready else None
+
+        def all_speakers(self):
+            return [Speaker()] if self.ready else []
+
+        def get_microphone(self, **_kwargs):
+            return type("Microphone", (), {"recorder": lambda *_a, **_k: Recorder()})()
+
+    backend = Backend()
+    controller = CaptionController(
+        source_factory=lambda device: LoopbackSource(
+            device, backend=backend, retry_forever=True, retry_interval=0.01,
+        ),
+        local_factory=FakeLocalEngine,
+        voice_detector_factory=lambda: lambda _frame: False,
+    )
+    statuses = []
+    levels = []
+    controller.status_changed.connect(statuses.append)
+    controller.level_changed.connect(levels.append)
+    try:
+        assert controller.start(Settings())
+        for _ in range(50):
+            QTest.qWait(20)
+            if any("等待系统默认" in message for message in statuses):
+                break
+        assert any("等待系统默认" in message for message in statuses)
+        backend.ready = True
+        for _ in range(50):
+            QTest.qWait(20)
+            if any("正在监听：Reconnected headset" in message for message in statuses):
+                break
+        assert any("正在监听：Reconnected headset" in message for message in statuses)
+        backend.ready = False
+        for _ in range(70):
+            time.sleep(0.02)
+            qapp.processEvents()
+            if statuses and "等待系统默认" in statuses[-1]:
+                break
+        assert "等待系统默认" in statuses[-1]
+        assert levels[-1] is None
+    finally:
+        controller.stop()
 
 
 def test_audio_level_updates_are_emitted_and_old_sessions_are_ignored(qapp):

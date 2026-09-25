@@ -1,16 +1,18 @@
 from datetime import date
+from threading import Event
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from deutsch_overlay.credentials import AzureCredentialStore, AzureCredentials
+from deutsch_overlay.credentials import AzureCredentialStore, AzureCredentials, SERVICE_NAME
 from deutsch_overlay.engines.azure import (
     AzureEngine,
     OnlineBudget,
     OnlineLimitReached,
     OnlineUnavailable,
     caption_from_azure_result,
+    wait_for_sdk_future,
 )
 
 
@@ -32,6 +34,78 @@ def test_credentials_use_keyring_and_do_not_show_secret_in_repr():
     credentials = store.get()
     assert credentials == AzureCredentials("eastasia", "a" * 32)
     assert "a" * 32 not in repr(credentials)
+
+
+def test_credentials_update_is_single_keyring_write_and_legacy_values_are_read():
+    backend = FakeKeyring()
+    backend.values[(SERVICE_NAME, "region")] = "eastasia"
+    backend.values[(SERVICE_NAME, "key")] = "a" * 32
+    store = AzureCredentialStore(backend)
+    assert store.get() == AzureCredentials("eastasia", "a" * 32)
+    backend.calls = []
+    original_set = backend.set_password
+    def recording_set(service, name, value):
+        backend.calls.append((service, name))
+        original_set(service, name, value)
+    backend.set_password = recording_set
+    store.save("westeurope", "b" * 32)
+    assert backend.calls == [(SERVICE_NAME, "credentials")]
+    assert store.get() == AzureCredentials("westeurope", "b" * 32)
+
+
+def test_failed_credentials_save_keeps_previous_pair():
+    backend = FakeKeyring()
+    store = AzureCredentialStore(backend)
+    store.save("eastasia", "a" * 32)
+    backend.set_password = lambda *_args: (_ for _ in ()).throw(OSError("keyring unavailable"))
+    with pytest.raises(OSError):
+        store.save("westeurope", "b" * 32)
+    assert store.get() == AzureCredentials("eastasia", "a" * 32)
+
+
+def test_sdk_future_timeout_does_not_block_caller():
+    release = Event()
+    class StuckFuture:
+        def get(self):
+            release.wait(2)
+    try:
+        with pytest.raises(OnlineUnavailable, match="timed out"):
+            wait_for_sdk_future(StuckFuture(), 0.02)
+    finally:
+        release.set()
+
+
+def test_online_start_timeout_closes_audio_stream(tmp_path, monkeypatch):
+    from deutsch_overlay.engines import azure as azure_module
+
+    release = Event()
+    original_wait = wait_for_sdk_future
+    monkeypatch.setattr(azure_module, "wait_for_sdk_future", lambda future, _timeout: original_wait(future, 0.02))
+
+    class StuckFuture:
+        def get(self):
+            release.wait(2)
+
+    class SlowRecognizer(FakeRecognizer):
+        def start_continuous_recognition_async(self):
+            return StuckFuture()
+
+    class Store:
+        def get(self):
+            return AzureCredentials("eastasia", "a" * 32)
+
+    sdk = fake_sdk()
+    sdk.translation.TranslationRecognizer = SlowRecognizer
+    streams = []
+    sdk.audio.PushAudioInputStream = lambda **kwargs: (streams.append(FakeStream(**kwargs)), streams[-1])[1]
+    engine = AzureEngine(Store(), OnlineBudget(tmp_path / "usage.json", 1), sdk=sdk)
+    try:
+        with pytest.raises(OnlineUnavailable, match="could not start"):
+            engine.start(1, "de", lambda _event: None, lambda _error: None)
+        assert streams[0].closed
+        assert engine._stream is None
+    finally:
+        release.set()
 
 
 def test_budget_persists_daily_usage_and_refuses_extra_audio(tmp_path):
@@ -97,11 +171,12 @@ def test_online_limit_stops_before_sending_audio(tmp_path):
     budget = OnlineBudget(tmp_path / "usage.json", 1)
     assert budget.allow(60)
     engine = AzureEngine(object(), budget)
-    engine._stream = FakeStream()
+    stream = FakeStream()
+    engine._stream = stream
     engine._active = True
     with pytest.raises(OnlineLimitReached):
         engine.push_frame(np.zeros(1600, dtype=np.float32))
-    assert engine._stream.writes == []
+    assert stream.writes == []
 
 
 class FakeSignal:
@@ -197,8 +272,25 @@ def test_online_stream_uses_auto_language_and_emits_caption(tmp_path):
     assert errors == ["在线识别已中断，请检查网络或 Azure 服务状态"]
     with pytest.raises(OnlineUnavailable, match="interrupted"):
         engine.push_frame(np.ones(1600, dtype=np.float32) * 0.2)
+    stream = engine._stream
     engine.stop()
-    assert engine._stream.closed
+    assert stream.closed
+
+
+def test_online_stop_closes_stream_and_recognizer_once(tmp_path):
+    class Store:
+        def get(self):
+            return AzureCredentials("eastasia", "a" * 32)
+
+    engine = AzureEngine(Store(), OnlineBudget(tmp_path / "usage.json", 1), sdk=fake_sdk())
+    engine.start(1, "de", lambda _event: None, lambda _error: None)
+    recognizer, stream = engine._recognizer, engine._stream
+    calls = []
+    recognizer.stop_continuous_recognition_async = lambda: (calls.append("stop"), FakeFuture())[1]
+    stream.close = lambda: calls.append("close")
+    engine.stop()
+    engine.stop()
+    assert calls == ["stop", "close"]
 
 
 def test_online_language_lock_skips_auto_detection(tmp_path):
