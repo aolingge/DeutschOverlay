@@ -18,25 +18,30 @@ class CaptionOverlay(QWidget):
         self._settings = settings
         self._locked = True
         self._drag_origin: QPoint | None = None
+        self._primary_text = ""
+        self._secondary_text = ""
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._apply_flags()
 
         self.frame = QFrame(self)
+        self.frame.setObjectName("captionFrame")
         self.primary_label = QLabel(self.frame)
+        self.primary_label.setTextFormat(Qt.TextFormat.PlainText)
         self.primary_label.setWordWrap(True)
         self.primary_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.secondary_label = QLabel(self.frame)
+        self.secondary_label.setTextFormat(Qt.TextFormat.PlainText)
         self.secondary_label.setWordWrap(True)
         self.secondary_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.secondary_label.hide()
 
-        inner = QVBoxLayout(self.frame)
-        inner.setContentsMargins(18, 9, 18, 9)
-        inner.setSpacing(2)
-        inner.addWidget(self.primary_label)
-        inner.addWidget(self.secondary_label)
+        self.inner_layout = QVBoxLayout(self.frame)
+        self.inner_layout.setContentsMargins(18, 9, 18, 9)
+        self.inner_layout.setSpacing(2)
+        self.inner_layout.addWidget(self.primary_label)
+        self.inner_layout.addWidget(self.secondary_label)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self.frame)
@@ -67,50 +72,122 @@ class CaptionOverlay(QWidget):
 
     def set_style(self, settings: Settings) -> None:
         self._settings = settings
+        alpha = round(settings.opacity * 255)
+        color = settings.background_color
+        red, green, blue = (int(color[index:index + 2], 16) for index in (1, 3, 5))
+        self.inner_layout.setContentsMargins(
+            settings.padding_horizontal + settings.border_width,
+            settings.padding_vertical + settings.border_width,
+            settings.padding_horizontal + settings.border_width,
+            settings.padding_vertical + settings.border_width,
+        )
+        self.frame.setStyleSheet(
+            f"QFrame#captionFrame {{ background-color: rgba({red}, {green}, {blue}, {alpha}); "
+            f"border: {settings.border_width}px solid {settings.border_color}; "
+            f"border-radius: {settings.corner_radius}px; }}"
+        )
+        self.primary_label.setStyleSheet(f"color: {settings.primary_color}; background: transparent;")
+        self.secondary_label.setStyleSheet(f"color: {settings.secondary_color}; background: transparent;")
+        self._fit_text()
+
+    def _target_screen(self):
+        x, y = self._settings.overlay_x, self._settings.overlay_y
+        if self._settings.overlay_position == "custom" and x is not None and y is not None:
+            for screen in QGuiApplication.screens():
+                if screen.availableGeometry().contains(QPoint(x, y)):
+                    return screen
+        return QGuiApplication.primaryScreen()
+
+    def _set_font_size(self, size: int) -> None:
         primary_font = self.primary_label.font()
-        primary_font.setPointSize(settings.font_size)
+        primary_font.setPointSize(size)
         primary_font.setBold(True)
         self.primary_label.setFont(primary_font)
         secondary_font = self.secondary_label.font()
-        secondary_font.setPointSize(max(12, settings.font_size - 8))
+        secondary_font.setPointSize(max(12, size - 8))
         self.secondary_label.setFont(secondary_font)
-        alpha = round(settings.opacity * 220)
-        self.frame.setStyleSheet(
-            f"QFrame {{ background-color: rgba(0, 0, 0, {alpha}); border-radius: 8px; }}"
-            "QLabel { color: white; background: transparent; }"
-        )
-        self.primary_label.setStyleSheet("color: white; background: transparent;")
-        self.secondary_label.setStyleSheet("color: #dddddd; background: transparent;")
-        self.setFixedWidth(settings.overlay_width)
-        self._fit_text()
+
+    @staticmethod
+    def _text_height(label: QLabel, width: int) -> int:
+        return max(label.fontMetrics().height(), label.heightForWidth(width))
+
+    def _elide_to_height(self, label: QLabel, source: str, width: int, limit: int) -> int:
+        label.setText(source)
+        if self._text_height(label, width) <= limit:
+            return self._text_height(label, width)
+        low, high = 0, len(source)
+        best = "…"
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = source[:middle].rstrip() + "…"
+            label.setText(candidate)
+            if self._text_height(label, width) <= limit:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        label.setText(best)
+        return min(limit, self._text_height(label, width))
 
     def _fit_text(self) -> None:
-        text_width = max(1, self.width() - 36)
-        primary_height = max(self.primary_label.fontMetrics().height(), self.primary_label.heightForWidth(text_width))
+        screen = self._target_screen()
+        rect = screen.availableGeometry() if screen is not None else None
+        display_width = min(self._settings.overlay_width, rect.width()) if rect is not None else self._settings.overlay_width
+        self.setFixedWidth(display_width)
+        max_height = min(rect.height(), max(120, round(rect.height() * 0.4))) if rect is not None else 10000
+        margins = self.inner_layout.contentsMargins()
+        frame_border = self.frame.frameWidth() * 2
+        text_width = max(1, display_width - margins.left() - margins.right() - frame_border)
+        has_secondary = bool(self._secondary_text)
+        self.secondary_label.setVisible(has_secondary)
+        spacing = self.inner_layout.spacing() if has_secondary else 0
+        content_limit = max(1, max_height - margins.top() - margins.bottom() - spacing - frame_border)
+
+        def measure(size: int) -> tuple[int, int]:
+            self._set_font_size(size)
+            self.primary_label.setText(self._primary_text)
+            self.secondary_label.setText(self._secondary_text)
+            primary = self._text_height(self.primary_label, text_width)
+            secondary = self._text_height(self.secondary_label, text_width) if has_secondary else 0
+            return primary, secondary
+
+        low, high, best = 12, self._settings.font_size, 12
+        while low <= high:
+            size = (low + high) // 2
+            primary_height, secondary_height = measure(size)
+            if primary_height + secondary_height <= content_limit:
+                best = size
+                low = size + 1
+            else:
+                high = size - 1
+        primary_height, secondary_height = measure(best)
+        if primary_height + secondary_height > content_limit:
+            secondary_reserve = min(secondary_height, max(
+                self.secondary_label.fontMetrics().height(), content_limit // 3
+            )) if has_secondary else 0
+            primary_limit = max(1, min(primary_height, content_limit - secondary_reserve))
+            secondary_limit = max(1, content_limit - primary_limit)
+            primary_height = self._elide_to_height(self.primary_label, self._primary_text, text_width, primary_limit)
+            if has_secondary:
+                secondary_height = self._elide_to_height(
+                    self.secondary_label, self._secondary_text, text_width, secondary_limit
+                )
         self.primary_label.setFixedHeight(primary_height)
-        secondary_height = 0
-        if not self.secondary_label.isHidden():
-            secondary_height = max(self.secondary_label.fontMetrics().height(), self.secondary_label.heightForWidth(text_width))
+        if has_secondary:
             self.secondary_label.setFixedHeight(secondary_height)
-        self.setFixedHeight(18 + primary_height + (2 + secondary_height if secondary_height else 0))
+        self.setFixedHeight(min(max_height, margins.top() + primary_height + spacing +
+                                secondary_height + margins.bottom() + frame_border))
         self.layout().activate()
         self._place_on_screen()
 
     def _place_on_screen(self) -> None:
-        screen = QGuiApplication.primaryScreen()
-        if screen is None:
+        target = self._target_screen()
+        if target is None:
             return
         x, y = self._settings.overlay_x, self._settings.overlay_y
         custom = self._settings.overlay_position == "custom"
-        target = next(
-            (candidate for candidate in QGuiApplication.screens()
-             if custom and x is not None and y is not None and candidate.availableGeometry().contains(QPoint(x, y))),
-            None,
-        )
-        if target is None:
-            target = screen
         rect = target.availableGeometry()
-        if not custom or x is None or y is None or (target is screen and not rect.contains(QPoint(x, y))):
+        if not custom or x is None or y is None or not rect.contains(QPoint(x, y)):
             vertical, horizontal = self._settings.overlay_position.split("-") if not custom else ("bottom", "center")
             x = {"left": rect.left() + 45, "center": rect.center().x() - self.width() // 2,
                  "right": rect.right() - self.width() - 44}[horizontal]
@@ -121,9 +198,8 @@ class CaptionOverlay(QWidget):
         self.move(x, y)
 
     def show_caption(self, view: CaptionView) -> None:
-        self.primary_label.setText(view.primary)
-        self.secondary_label.setText(view.secondary or "")
-        self.secondary_label.setVisible(bool(view.secondary))
+        self._primary_text = view.primary
+        self._secondary_text = view.secondary or ""
         self._fit_text()
         self.show()
         self.raise_()

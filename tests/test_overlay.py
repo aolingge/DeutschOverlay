@@ -51,6 +51,125 @@ def test_overlay_position_and_style_are_applied(qapp):
     overlay.close()
 
 
+def test_background_frame_style_and_padding_update_live(qapp):
+    overlay = CaptionOverlay(Settings())
+    overlay.show_caption(view("你好"))
+    styled = Settings(
+        background_color="#123456", primary_color="#ABCDEF", secondary_color="#FEDCBA",
+        border_color="#FFCC00", border_width=2, corner_radius=14,
+        padding_horizontal=24, padding_vertical=11, opacity=0.5,
+    )
+    overlay.set_style(styled)
+    assert "rgba(18, 52, 86, 128)" in overlay.frame.styleSheet()
+    assert "border: 2px solid #FFCC00" in overlay.frame.styleSheet()
+    assert "border-radius: 14px" in overlay.frame.styleSheet()
+    assert "#ABCDEF" in overlay.primary_label.styleSheet()
+    assert "#FEDCBA" in overlay.secondary_label.styleSheet()
+    margins = overlay.inner_layout.contentsMargins()
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (26, 13, 26, 13)
+    assert overlay.height() >= overlay.primary_label.height() + overlay.secondary_label.height() + 26
+    overlay.close()
+
+
+def test_transparent_background_does_not_hide_caption_text(qapp):
+    overlay = CaptionOverlay(Settings(opacity=0))
+    overlay.show_caption(view())
+    assert "rgba(0, 0, 0, 0)" in overlay.frame.styleSheet()
+    assert overlay.primary_label.isVisible()
+    overlay.close()
+
+
+def test_rendered_frame_pixel_changes_with_selected_background(qapp):
+    overlay = CaptionOverlay(Settings(background_color="#123456", opacity=1, corner_radius=0))
+    overlay.show_caption(view())
+    qapp.processEvents()
+    image = overlay.frame.grab().toImage()
+    color = image.pixelColor(4, image.height() // 2)
+    assert (color.red(), color.green(), color.blue()) == (18, 52, 86)
+    overlay.close()
+
+
+def test_border_remains_visible_with_transparent_background(qapp):
+    overlay = CaptionOverlay(Settings(opacity=0, border_width=2, border_color="#FFCC00", corner_radius=0))
+    overlay.show_caption(view())
+    qapp.processEvents()
+    image = overlay.frame.grab().toImage()
+    border = image.pixelColor(1, image.height() // 2)
+    background = image.pixelColor(6, image.height() // 2)
+    assert (border.red(), border.green(), border.blue(), border.alpha()) == (255, 204, 0, 255)
+    assert background.alpha() == 0
+    overlay.close()
+
+
+def test_outline_is_only_around_outer_frame_not_each_text_line(qapp):
+    overlay = CaptionOverlay(Settings(background_color="#101820", border_color="#F2D88A",
+                                      border_width=2, corner_radius=0, opacity=1))
+    overlay.show_caption(view("你好"))
+    qapp.processEvents()
+    image = overlay.frame.grab().toImage()
+    outer = image.pixelColor(1, image.height() // 2)
+    inner = image.pixelColor(overlay.primary_label.x() + 3, overlay.primary_label.y() + 1)
+    assert (outer.red(), outer.green(), outer.blue()) == (242, 216, 138)
+    assert (inner.red(), inner.green(), inner.blue()) == (16, 24, 32)
+    assert overlay.secondary_label.y() >= (
+        overlay.primary_label.y() + overlay.primary_label.height() + overlay.inner_layout.spacing()
+    )
+    overlay.close()
+
+
+def test_caption_text_is_always_treated_as_plain_text(qapp):
+    overlay = CaptionOverlay(Settings())
+    overlay.show_caption(CaptionView(1, "markup", "<b>Hallo</b>", "<img src='local'>", True, 1.0))
+    assert overlay.primary_label.textFormat() == Qt.TextFormat.PlainText
+    assert overlay.secondary_label.textFormat() == Qt.TextFormat.PlainText
+    assert overlay.primary_label.text() == "<b>Hallo</b>"
+    overlay.close()
+
+
+def test_overlay_width_is_limited_to_current_screen(qapp):
+    rect = QGuiApplication.primaryScreen().availableGeometry()
+    overlay = CaptionOverlay(Settings(overlay_width=3840, overlay_position="top-center"))
+    overlay.show_caption(view())
+    assert overlay.width() <= rect.width()
+    assert rect.left() <= overlay.x()
+    assert overlay.x() + overlay.width() <= rect.right() + 1
+    overlay.close()
+
+
+def test_extreme_style_and_long_bilingual_caption_stay_on_screen(qapp):
+    rect = QGuiApplication.primaryScreen().availableGeometry()
+    settings = Settings(overlay_width=240, font_size=72, padding_horizontal=40,
+                        padding_vertical=24, border_width=8, overlay_position="bottom-center")
+    overlay = CaptionOverlay(settings)
+    overlay.show_caption(CaptionView(1, "long", "Sehr langer deutscher Untertitel. " * 8,
+                                     "这是一段很长的中文原文。" * 8, True, 1.0))
+    assert overlay.height() <= max(120, round(rect.height() * 0.4))
+    assert rect.top() <= overlay.y()
+    assert overlay.y() + overlay.height() <= rect.bottom() + 1
+    assert overlay.primary_label.text()
+    qapp.processEvents()
+    assert overlay.secondary_label.y() >= (
+        overlay.primary_label.y() + overlay.primary_label.height() + overlay.inner_layout.spacing()
+    )
+    assert overlay.primary_label.height() >= overlay.primary_label.heightForWidth(overlay.primary_label.width())
+    assert overlay.secondary_label.height() >= overlay.secondary_label.heightForWidth(overlay.secondary_label.width())
+    overlay.show_caption(view("你好"))
+    assert overlay.primary_label.text() == "Hallo Welt"
+    overlay.close()
+
+
+def test_short_original_does_not_waste_german_caption_height(qapp):
+    settings = Settings(overlay_width=240, font_size=12, padding_horizontal=40,
+                        padding_vertical=24, border_width=8)
+    overlay = CaptionOverlay(settings)
+    overlay.show_caption(CaptionView(1, "long", "Ein sehr langer deutscher Satz. " * 15,
+                                     "中", True, 1.0))
+    assert len(overlay.primary_label.text()) > 80
+    assert overlay.secondary_label.text() == "中"
+    assert overlay.height() > 280
+    overlay.close()
+
+
 def test_final_caption_hides_after_delay(qapp):
     from PySide6.QtTest import QTest
 

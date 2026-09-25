@@ -8,7 +8,8 @@ Windows 11 上的德语实时字幕条。它识别电脑正在播放的声音：
 2. 选择播放设备。若不确定，保留“系统默认播放设备”；耳机插拔后可点“刷新”。
 3. 启动游戏或视频。语音出现时，字幕条会在所选位置显示；安静一段时间后自动隐去。
 4. 在“字幕内容”中选择“仅德语”或“德语 + 原文”。播放中文视频时，后者显示德语译文和中文原文；播放德语内容时只显示一遍德语。
-5. 在“字幕位置”中选择屏幕九宫格位置，也可选“自定义拖动”。点“解锁/锁定字幕位置”后拖动字幕条，完成后再次锁定；位置跑出屏幕时点“字幕位置复位”。锁定状态下，鼠标操作会穿过字幕条。宽度、字体、背景透明度和隐藏延迟也可调整。
+5. 在“字幕位置”中选择屏幕九宫格位置，也可选“自定义拖动”。点“解锁/锁定字幕位置”后拖动字幕条，完成后再次锁定；位置跑出屏幕时点“字幕位置复位”。锁定状态下，鼠标操作会穿过字幕条。
+6. “背景样式”提供深色、浅色、透明文字和描边四种预设。还可分别选择背景、德语文字、原文和边框颜色，以及不透明度、边框宽度、圆角、内边距、字幕宽度与字体大小。点击“应用并预览”即可看到示例字幕；设定会保存到本机。
 
 快捷键：`Ctrl+Alt+1` 切换原文对照；`Ctrl+Alt+2` 显示或隐藏字幕；`Ctrl+Alt+3` 在自动、德语、英语、中文之间切换；`Ctrl+Alt+4` 暂停或继续识别。若快捷键被游戏占用，可用托盘菜单操作。
 
@@ -31,6 +32,7 @@ Azure 官方目前列有 Speech Translation F0 每月 5 小时免费额度；[�
 - 首版监听选定播放设备的混合声音，不区分游戏、视频和系统通知，也不监听麦克风。
 - 无边框全屏是目标游戏模式。独占全屏、部分反作弊游戏和受保护视频可能阻止覆盖显示或音频采集。
 - 背景音乐、音效、多人同时说话会影响识别；约 2–3 秒是优化目标，具体延迟以实测为准。
+- 字幕宽度会受当前屏幕宽度限制。极端大字号和很长的双语字幕会自动缩小显示字号；仍放不下时，屏幕上的文字会在末尾省略，下一句会按原设置重新排版。
 - 首版不保存录音和字幕历史。
 
 ## 从源码运行与打包
@@ -45,5 +47,9 @@ $env:DEUTSCH_OVERLAY_MODELS = (Join-Path (Get-Location) 'models')
 ```
 
 模型转换需要 PyTorch；开发者可创建带系统站点包的 `.model-venv` 并安装 `ctranslate2`、`transformers`、`sentencepiece`、`huggingface-hub`、`requests`，再运行 `scripts/prepare-models.ps1`。模型大文件从上游按区间续传，并与上游 SHA-256 对照。Windows EXE 的构建命令是 `scripts/build-exe.ps1`，输出在 `dist/DeutschOverlay/`。
+
+## 验证
+
+常规测试运行 `python -m pytest -q --cov=deutsch_overlay --cov-report=term`。本机有德、英、中 Windows SAPI 语音时，可设置环境变量 `DEUTSCH_TEST_REAL_MODELS=1` 再运行 `python -m pytest -q tests/test_real_models.py`，用真实本地模型识别三段合成语音。若还设置 `DEUTSCH_TEST_LIVE_LOOPBACK=1`，测试会在默认播放设备上**播放一小段声音**并验证 Windows 回采、语音分段和德语字幕。未设置时，这些较慢且依赖设备的测试会跳过。在线 Azure 仍需使用自己的资源与密钥，在实际网络下单独验证。
 
 模型来源与许可：[faster-whisper small](https://huggingface.co/Systran/faster-whisper-small)、[OPUS-MT 英语到德语](https://huggingface.co/Helsinki-NLP/opus-mt-en-de)、[OPUS-MT 中文到德语](https://huggingface.co/Helsinki-NLP/opus-mt-zh-de)。分发前应保留各模型随附的许可和署名资料。

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -25,7 +26,15 @@ class Settings:
     overlay_position: str = "bottom-center"
     overlay_width: int = 840
     font_size: int = 28
-    opacity: float = 0.82
+    opacity: float = 0.70
+    background_color: str = "#000000"
+    primary_color: str = "#FFFFFF"
+    secondary_color: str = "#DDDDDD"
+    border_color: str = "#FFFFFF"
+    border_width: int = 0
+    corner_radius: int = 8
+    padding_horizontal: int = 18
+    padding_vertical: int = 9
     fade_seconds: float = 3.0
     online_minutes_limit: int = 30
 
@@ -52,8 +61,17 @@ class Settings:
             raise ConfigError("overlay_width must be between 240 and 3840")
         if type(self.font_size) is not int or not 12 <= self.font_size <= 72:
             raise ConfigError("font_size must be between 12 and 72")
-        if isinstance(self.opacity, bool) or not isinstance(self.opacity, (float, int)) or not 0.1 <= self.opacity <= 1:
-            raise ConfigError("opacity must be between 0.1 and 1")
+        if isinstance(self.opacity, bool) or not isinstance(self.opacity, (float, int)) or not 0 <= self.opacity <= 1:
+            raise ConfigError("opacity must be between 0 and 1")
+        for name in ("background_color", "primary_color", "secondary_color", "border_color"):
+            value = getattr(self, name)
+            if type(value) is not str or re.fullmatch(r"#[0-9A-Fa-f]{6}", value) is None:
+                raise ConfigError(f"{name} must be a six-digit hex color")
+        for name, maximum in (("border_width", 8), ("corner_radius", 32),
+                              ("padding_horizontal", 40), ("padding_vertical", 24)):
+            value = getattr(self, name)
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ConfigError(f"{name} must be between 0 and {maximum}")
         if isinstance(self.fade_seconds, bool) or not isinstance(self.fade_seconds, (float, int)) or not 0 <= self.fade_seconds <= 30:
             raise ConfigError("fade_seconds must be between 0 and 30")
         if type(self.online_minutes_limit) is not int or not 1 <= self.online_minutes_limit <= 1440:
@@ -72,6 +90,10 @@ def load_settings(path: Path) -> Settings:
         raise ConfigError("settings file must contain an object")
     if "overlay_position" not in data and data.get("overlay_x") is not None and data.get("overlay_y") is not None:
         data["overlay_position"] = "custom"
+    if "background_color" not in data and "opacity" in data:
+        legacy_opacity = data["opacity"]
+        if type(legacy_opacity) in (int, float) and 0.1 <= legacy_opacity <= 1:
+            data["opacity"] = legacy_opacity * 220 / 255
     try:
         return Settings(**data)
     except TypeError as exc:

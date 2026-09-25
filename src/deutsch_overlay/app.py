@@ -115,6 +115,7 @@ class DesktopApp:
         self.window.models_help_requested.connect(self._show_model_help)
         self.window.refresh_devices_requested.connect(self.refresh_devices)
         self.window.reset_position_requested.connect(self.reset_position)
+        self.window.preview_requested.connect(self.apply_and_preview)
         self.overlay.moved.connect(self._save_position)
         self.hotkeys.action.connect(self._hotkey_action)
         self.hotkeys.failed.connect(self.window.set_status)
@@ -129,13 +130,13 @@ class DesktopApp:
         if self._visible and not self._paused:
             self.overlay.show_caption(view)
 
-    def apply_settings(self, updated: Settings) -> None:
+    def apply_settings(self, updated: Settings) -> bool:
         previous = self.settings
         try:
             save_settings(self.settings_path, updated)
         except OSError:
             self.window.set_status("设置保存失败，请检查应用数据目录")
-            return
+            return False
         self.settings = updated
         self.window.update_settings(updated)
         self.overlay.set_style(updated)
@@ -150,6 +151,7 @@ class DesktopApp:
             self._restart_pending = self.controller.start(updated) is False
         elif not pipeline_changed and not self._restart_pending:
             self.window.set_status("设置已保存")
+        return True
 
     def save_credentials(self, region: str, key: str) -> None:
         try:
@@ -206,6 +208,17 @@ class DesktopApp:
     def reset_position(self) -> None:
         self.apply_settings(replace(self.settings, overlay_x=None, overlay_y=None, overlay_position="bottom-center"))
         self.window.set_status("字幕位置已恢复到屏幕下方")
+
+    def preview_caption(self) -> None:
+        self.overlay.show_caption(CaptionView(
+            0, "preview", "Guten Tag! Ich lerne Deutsch.",
+            "你好，我在学习德语。" if self.settings.compare_original else None,
+            True, 0.0,
+        ))
+
+    def apply_and_preview(self, updated: Settings) -> None:
+        if self.apply_settings(updated):
+            self.preview_caption()
 
     def _show_model_help(self) -> None:
         QMessageBox.information(
