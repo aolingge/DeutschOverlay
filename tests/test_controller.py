@@ -60,6 +60,36 @@ def test_local_audio_reaches_caption_view(qapp):
     assert views and views[0].primary == "Guten Tag"
 
 
+def test_listening_status_waits_for_first_capture_frame(qapp):
+    entered = threading.Event()
+    ready = threading.Event()
+
+    class SlowOpeningSource:
+        def frames(self, stop):
+            entered.set()
+            ready.wait(2)
+            if not stop.is_set():
+                yield np.zeros(1600, dtype=np.float32)
+
+    controller = CaptionController(source_factory=lambda _device: SlowOpeningSource(), local_factory=FakeLocalEngine)
+    statuses = []
+    controller.status_changed.connect(statuses.append)
+    try:
+        controller.start(Settings())
+        assert entered.wait(2)
+        QTest.qWait(50)
+        assert not any("正在监听" in status for status in statuses)
+        ready.set()
+        for _ in range(50):
+            QTest.qWait(20)
+            if any("正在监听" in status for status in statuses):
+                break
+        assert any("正在监听" in status for status in statuses)
+    finally:
+        ready.set()
+        controller.stop()
+
+
 def test_old_session_event_is_ignored_after_restart(qapp):
     controller = CaptionController(
         source_factory=lambda _device: FiniteSource([]),

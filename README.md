@@ -52,4 +52,6 @@ $env:DEUTSCH_OVERLAY_MODELS = (Join-Path (Get-Location) 'models')
 
 常规测试运行 `python -m pytest -q --cov=deutsch_overlay --cov-report=term`。本机有德、英、中 Windows SAPI 语音时，可设置环境变量 `DEUTSCH_TEST_REAL_MODELS=1` 再运行 `python -m pytest -q tests/test_real_models.py`，用真实本地模型识别三段合成语音。若还设置 `DEUTSCH_TEST_LIVE_LOOPBACK=1`，测试会在默认播放设备上**播放一小段声音**并验证 Windows 回采、语音分段和德语字幕。未设置时，这些较慢且依赖设备的测试会跳过。在线 Azure 仍需使用自己的资源与密钥，在实际网络下单独验证。
 
+安装 FFmpeg 和 FFplay 后，运行 `python -m pytest -q -s tests/test_video_playback.py`（同样需设置上述两个环境变量），可自动制作德、英、中三段已知台词的 MP4，用 FFplay 从默认播放设备播放，检查真实系统回采、自动语言判断、原文识别和德语翻译。测试会打印音频峰值和**已截取语音的模型处理耗时**；该数字不包含视频播放、句尾静音等待和设备初始化，不能当作屏幕字幕的总延迟。此测试播放的是合成语音，真人口音、背景音乐和游戏音效仍需用对应样本验证。
+
 模型来源与许可：[faster-whisper small](https://huggingface.co/Systran/faster-whisper-small)、[OPUS-MT 英语到德语](https://huggingface.co/Helsinki-NLP/opus-mt-en-de)、[OPUS-MT 中文到德语](https://huggingface.co/Helsinki-NLP/opus-mt-zh-de)。分发前应保留各模型随附的许可和署名资料。

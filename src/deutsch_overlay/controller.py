@@ -176,10 +176,14 @@ class CaptionController(QObject):
             clips.put_nowait((f"{session_id}-{counter}", clip))
 
         try:
-            self._status_from_worker.emit(session_id, "正在监听电脑播放声（本地模式）")
+            self._status_from_worker.emit(session_id, "正在连接电脑播放设备（本地模式）")
+            listening = False
             for frame in self.source_factory(settings.output_device_id).frames(stop):
                 if stop.is_set():
                     break
+                if not listening:
+                    self._status_from_worker.emit(session_id, "正在监听电脑播放声（本地模式）")
+                    listening = True
                 for clip in segmenter.push(frame):
                     queue_clip(clip)
             if not stop.is_set():
@@ -203,10 +207,14 @@ class CaptionController(QObject):
                 self._caption_from_worker.emit,
                 lambda message: self._status_from_worker.emit(session_id, message),
             )
-            self._status_from_worker.emit(session_id, "正在监听电脑播放声（在线模式，可能产生费用）")
+            self._status_from_worker.emit(session_id, "正在连接电脑播放设备（在线模式，可能产生费用）")
+            listening = False
             for frame in self.source_factory(settings.output_device_id).frames(stop):
                 if stop.is_set():
                     break
+                if not listening:
+                    self._status_from_worker.emit(session_id, "正在监听电脑播放声（在线模式，可能产生费用）")
+                    listening = True
                 engine.push_frame(frame)
         except (OnlineUnavailable, OnlineLimitReached) as exc:
             self._status_from_worker.emit(session_id, f"在线识别停止：{exc}")
