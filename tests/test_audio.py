@@ -98,7 +98,6 @@ def test_segmenter_ignores_silence_and_short_noise():
         assert segmenter.push(silence) == []
     assert segmenter.flush() is None
 
-
 def test_segmenter_emits_speech_after_trailing_silence():
     segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600)
     voice = np.full(1600, 0.15, dtype=np.float32)
@@ -132,6 +131,16 @@ def test_segmenter_bounds_long_speech():
         outputs.extend(segmenter.push(voice))
     assert outputs
     assert len(outputs[0]) <= 16000 // 2
+
+
+def test_segmenter_snapshot_keeps_current_speech_for_final_caption():
+    segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600, max_seconds=5)
+    voice = np.full(1600, 0.15, dtype=np.float32)
+    for _ in range(20):
+        assert segmenter.push(voice) == []
+    preview = segmenter.snapshot()
+    assert preview is not None and len(preview) == 20 * 1600
+    assert len(segmenter.flush()) == 20 * 1600
 
 
 def test_segmenter_accepts_quiet_playback_speech():

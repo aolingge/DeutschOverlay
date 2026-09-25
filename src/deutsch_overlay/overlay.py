@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QMouseEvent
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QLabel, QVBoxLayout, QWidget
 
 from deutsch_overlay.captions import CaptionView
 from deutsch_overlay.config import Settings
@@ -28,10 +28,14 @@ class CaptionOverlay(QWidget):
         self.frame = QFrame(self)
         self.frame.setObjectName("captionFrame")
         self.primary_label = QLabel(self.frame)
+        self.primary_opacity = QGraphicsOpacityEffect(self.primary_label)
+        self.primary_label.setGraphicsEffect(self.primary_opacity)
         self.primary_label.setTextFormat(Qt.TextFormat.PlainText)
         self.primary_label.setWordWrap(True)
         self.primary_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.secondary_label = QLabel(self.frame)
+        self.secondary_opacity = QGraphicsOpacityEffect(self.secondary_label)
+        self.secondary_label.setGraphicsEffect(self.secondary_opacity)
         self.secondary_label.setTextFormat(Qt.TextFormat.PlainText)
         self.secondary_label.setWordWrap(True)
         self.secondary_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -200,6 +204,9 @@ class CaptionOverlay(QWidget):
     def show_caption(self, view: CaptionView) -> None:
         self._primary_text = view.primary
         self._secondary_text = view.secondary or ""
+        opacity = 1.0 if view.final else 0.78
+        self.primary_opacity.setOpacity(opacity)
+        self.secondary_opacity.setOpacity(opacity)
         self._fit_text()
         self.show()
         self.raise_()

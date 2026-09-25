@@ -52,12 +52,23 @@ class LocalEngine:
         self.asr_factory = asr_factory or _whisper_factory
         self.prefer_gpu = prefer_gpu
         self.warning: str | None = None
+        self._warmed = False
 
     def prepare(self) -> None:
         """Load models before capture so the first spoken sentence is not queued cold."""
-        self._get_asr()
+        asr = self._get_asr()
         self._get_translator("en")
         self._get_translator("zh")
+        if not self._warmed:
+            segments, _ = asr.transcribe(
+                np.zeros(16000, dtype=np.float32),
+                language="de",
+                vad_filter=False,
+                beam_size=1,
+                condition_on_previous_text=False,
+            )
+            list(segments)
+            self._warmed = True
 
     def _get_asr(self):
         if self.asr is None:

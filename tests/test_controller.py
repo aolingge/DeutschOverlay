@@ -60,6 +60,38 @@ def test_local_audio_reaches_caption_view(qapp):
     assert views and views[0].primary == "Guten Tag"
 
 
+def test_long_local_speech_shows_provisional_then_final_caption(qapp):
+    voice = np.full(1600, 0.2, dtype=np.float32)
+    silence = np.zeros(1600, dtype=np.float32)
+    frames = [voice] * 32 + [silence] * 4
+
+    class LengthAwareEngine:
+        warning = None
+
+        def process(self, audio, _rate, session, segment, _lock):
+            return CaptionEvent(session, segment, "de", f"{len(audio)} samples", None, True, time.monotonic())
+
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource(frames),
+        local_factory=LengthAwareEngine,
+        voice_detector_factory=lambda: lambda frame: bool(np.max(frame) > 0.01),
+    )
+    views = []
+    controller.view_changed.connect(views.append)
+    try:
+        assert controller.start(Settings())
+        for _ in range(150):
+            QTest.qWait(20)
+            if any(view.final for view in views):
+                break
+        assert any(not view.final for view in views), views
+        assert any(view.final for view in views), views
+        assert len({view.segment_id for view in views}) == 1
+        assert views[-1].final is True
+    finally:
+        controller.stop()
+
+
 def test_listening_status_waits_for_first_capture_frame(qapp):
     entered = threading.Event()
     ready = threading.Event()

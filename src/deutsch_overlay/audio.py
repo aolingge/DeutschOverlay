@@ -145,6 +145,16 @@ class SpeechSegmenter:
         self._voice_frames = 0
         self._quiet_frames = 0
 
+    @property
+    def active_frames(self) -> int:
+        return len(self._frames)
+
+    def snapshot(self) -> np.ndarray | None:
+        """Copy the current utterance without consuming its final audio."""
+        if self._voice_frames < self.min_voice_frames:
+            return None
+        return np.concatenate(self._frames)
+
     def push(self, frame: np.ndarray) -> list[np.ndarray]:
         if frame.ndim != 1 or len(frame) != self.frame_samples:
             raise ValueError("frame must be a fixed-size mono array")

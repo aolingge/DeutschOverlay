@@ -33,6 +33,7 @@ def _online_engine(limit_minutes: int) -> AzureEngine:
 
 class CaptionController(QObject):
     STOP_JOIN_SECONDS = 3.0
+    LOCAL_PREVIEW_FRAMES = 20
     view_changed = Signal(object)
     status_changed = Signal(str)
     _caption_from_worker = Signal(object)
@@ -114,7 +115,7 @@ class CaptionController(QObject):
             self.status_changed.emit(message)
 
     def _run_local(self, session_id: int, settings: Settings, stop: threading.Event) -> None:
-        clips: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=4)
+        clips: queue.Queue[tuple[str, object, bool]] = queue.Queue(maxsize=4)
         capture_done = threading.Event()
         engine = self._local_engine or self.local_factory()
         self._local_engine = engine
@@ -140,14 +141,14 @@ class CaptionController(QObject):
         def infer() -> None:
             while not capture_done.is_set() or not clips.empty():
                 try:
-                    segment_id, clip = clips.get(timeout=0.1)
+                    segment_id, clip, final = clips.get(timeout=0.1)
                 except queue.Empty:
                     continue
                 try:
                     language = settings.language_lock if settings.language_lock != "auto" else None
                     event = engine.process(clip, 16000, session_id, segment_id, language)
                     if event is not None:
-                        self._caption_from_worker.emit(event)
+                        self._caption_from_worker.emit(replace(event, final=final))
                     if getattr(engine, "warning", None):
                         self._status_from_worker.emit(session_id, engine.warning)
                         engine.warning = None
@@ -163,17 +164,24 @@ class CaptionController(QObject):
             max_seconds=5.0, voice_detector=voice_detector,
         )
         counter = 0
+        last_preview_frame = 0
 
-        def queue_clip(clip) -> None:
+        def queue_clip(clip, *, final: bool = True) -> None:
             nonlocal counter
-            counter += 1
+            if not final and not clips.empty():
+                return
+            segment_id = f"{session_id}-{counter + 1}"
+            if final:
+                counter += 1
             if clips.full():
+                if not final:
+                    return
                 try:
                     clips.get_nowait()
                 except queue.Empty:
                     pass
                 self._status_from_worker.emit(session_id, "识别速度落后，已跳过一段旧语音")
-            clips.put_nowait((f"{session_id}-{counter}", clip))
+            clips.put_nowait((segment_id, clip, final))
 
         try:
             self._status_from_worker.emit(session_id, "正在连接电脑播放设备（本地模式）")
@@ -184,8 +192,16 @@ class CaptionController(QObject):
                 if not listening:
                     self._status_from_worker.emit(session_id, "正在监听电脑播放声（本地模式）")
                     listening = True
-                for clip in segmenter.push(frame):
+                completed = segmenter.push(frame)
+                for clip in completed:
                     queue_clip(clip)
+                if completed:
+                    last_preview_frame = 0
+                elif segmenter.active_frames >= last_preview_frame + self.LOCAL_PREVIEW_FRAMES:
+                    preview = segmenter.snapshot()
+                    if preview is not None:
+                        queue_clip(preview, final=False)
+                        last_preview_frame = segmenter.active_frames
             if not stop.is_set():
                 clip = segmenter.flush()
                 if clip is not None:

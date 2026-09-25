@@ -122,3 +122,25 @@ def test_prepare_loads_recognition_and_both_translation_models(tmp_path):
     engine._get_translator = lambda code: loaded.append(code)
     engine.prepare()
     assert loaded == ["whisper-small", "en", "zh"]
+
+
+def test_prepare_decodes_once_so_first_live_caption_is_not_cold():
+    class CountingAsr:
+        def __init__(self):
+            self.decodes = 0
+
+        def transcribe(self, audio, **kwargs):
+            assert audio.shape == (16000,)
+            assert kwargs["vad_filter"] is False
+
+            def segments():
+                self.decodes += 1
+                yield FakeSegment("")
+
+            return segments(), FakeInfo("de")
+
+    asr = CountingAsr()
+    engine = LocalEngine(asr=asr, translators={"en": FakeTranslator(""), "zh": FakeTranslator("")})
+    engine.prepare()
+    engine.prepare()
+    assert asr.decodes == 1

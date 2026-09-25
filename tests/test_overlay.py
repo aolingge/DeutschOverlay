@@ -34,6 +34,18 @@ def test_overlay_shows_german_and_optional_original(qapp):
     overlay.close()
 
 
+def test_provisional_caption_is_visually_distinct_until_final(qapp):
+    overlay = CaptionOverlay(Settings())
+    provisional = CaptionView(1, "same", "Guten", None, False, 1.0)
+    final = CaptionView(1, "same", "Guten Tag", None, True, 2.0)
+    overlay.show_caption(provisional)
+    assert overlay.primary_label.graphicsEffect().opacity() < 1
+    overlay.show_caption(final)
+    assert overlay.primary_label.graphicsEffect().opacity() == 1
+    assert overlay.primary_label.text() == "Guten Tag"
+    overlay.close()
+
+
 def test_lock_mode_passes_mouse_input_through(qapp):
     overlay = CaptionOverlay(Settings())
     overlay.set_locked(True)

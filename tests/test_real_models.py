@@ -129,3 +129,56 @@ def test_real_windows_playback_loopback_reaches_local_caption(local_engine, tmp_
     assert clips
     caption = local_engine.process(clips[0], 16000, 1, "loopback", "de")
     assert caption is not None and caption.original
+
+
+def test_long_german_speech_shows_local_preview_before_sentence_ends(local_engine, tmp_path: Path):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from deutsch_overlay.config import Settings
+    from deutsch_overlay.controller import CaptionController
+
+    wav_path = tmp_path / "long_german.wav"
+    synthesize_wav(
+        wav_path, "de-DE",
+        "Heute lernen wir gemeinsam die deutsche Sprache und sprechen langsam über viele interessante Wörter",
+    )
+    with wave.open(str(wav_path), "rb") as audio_file:
+        samples = np.frombuffer(audio_file.readframes(audio_file.getnframes()), dtype="<i2")
+    audio = samples.astype(np.float32) / 32768
+    padded = np.pad(audio, (0, (-len(audio)) % 1600))
+    frames = padded.reshape(-1, 1600)
+    assert len(frames) >= 30
+
+    playback_finished = []
+
+    class RecordedSpeechSource:
+        def frames(self, stop):
+            for frame in frames:
+                if stop.is_set():
+                    break
+                time.sleep(0.1)
+                yield frame
+            playback_finished.append(time.monotonic())
+
+    app = QApplication.instance() or QApplication([])
+    controller = CaptionController(
+        source_factory=lambda _device: RecordedSpeechSource(),
+        local_factory=lambda: local_engine,
+    )
+    captions = []
+    statuses = []
+    controller.view_changed.connect(lambda view: captions.append((time.monotonic(), view)))
+    controller.status_changed.connect(statuses.append)
+    try:
+        assert controller.start(Settings(language_lock="de"))
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline and (not playback_finished or controller.running):
+            app.processEvents()
+            time.sleep(0.02)
+        app.processEvents()
+        assert playback_finished, (statuses, captions)
+        assert any(not view.final and at < playback_finished[0] for at, view in captions), captions
+        assert any(view.final and "deutsche" in view.primary.lower() for _, view in captions), captions
+    finally:
+        controller.stop()
