@@ -90,6 +90,215 @@ def test_source_resolves_selected_device_and_converts_stereo_to_mono():
     assert np.allclose(frame, 1)
 
 
+def test_default_loopback_follows_output_device_change():
+    class SwitchingBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.default_id = "one"
+            self.opened = []
+
+        def default_speaker(self):
+            return next(speaker for speaker in self.speakers if speaker.id == self.default_id)
+
+        def get_microphone(self, *, id, include_loopback):
+            assert include_loopback
+            self.opened.append(id)
+            backend = self
+
+            class SwitchingRecorder(FakeRecorder):
+                def record(self, numframes):
+                    if id == "one":
+                        backend.default_id = "two"
+                    value = 1 if id == "one" else 2
+                    return np.full((numframes, 2), value, dtype=np.float32)
+
+            return FakeMic(SwitchingRecorder())
+
+    backend = SwitchingBackend()
+    source = LoopbackSource(backend=backend, device_check_frames=2)
+    frames = source.frames(Event())
+    try:
+        values = [float(next(frames)[0]) for _ in range(3)]
+    finally:
+        frames.close()
+    assert values == [1, 1, 2]
+    assert backend.opened == ["one", "two"]
+    assert source.active_device.id == "two"
+
+
+def test_explicit_output_device_does_not_follow_default_change():
+    class ChangedDefaultBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.opened = []
+
+        def default_speaker(self):
+            return self.speakers[0] if not self.opened else self.speakers[1]
+
+        def get_microphone(self, *, id, include_loopback):
+            assert include_loopback
+            self.opened.append(id)
+            value = 1 if id == "one" else 2
+            return FakeMic(FakeRecorder(np.full((1600, 2), value, dtype=np.float32)))
+
+    backend = ChangedDefaultBackend()
+    source = LoopbackSource("one", backend=backend, device_check_frames=1)
+    frames = source.frames(Event())
+    try:
+        assert [float(next(frames)[0]) for _ in range(3)] == [1, 1, 1]
+        assert backend.opened == ["one"]
+    finally:
+        frames.close()
+
+
+def test_default_loopback_reopens_when_previous_device_disconnects():
+    class DisconnectedBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.default_id = "one"
+            self.opened = []
+
+        def default_speaker(self):
+            return next(speaker for speaker in self.speakers if speaker.id == self.default_id)
+
+        def get_microphone(self, *, id, include_loopback):
+            assert include_loopback
+            self.opened.append(id)
+            backend = self
+
+            class DisconnectingRecorder(FakeRecorder):
+                def record(self, numframes):
+                    if id == "one":
+                        backend.default_id = "two"
+                        raise OSError("headset unplugged")
+                    return np.full((numframes, 2), 2, dtype=np.float32)
+
+            return FakeMic(DisconnectingRecorder())
+
+    backend = DisconnectedBackend()
+    frames = LoopbackSource(backend=backend).frames(Event())
+    try:
+        assert float(next(frames)[0]) == 2
+    finally:
+        frames.close()
+    assert backend.opened == ["one", "two"]
+
+
+def test_default_loopback_retries_before_default_switch_is_reported():
+    class LateSwitchBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.default_calls = 0
+            self.opened = []
+
+        def default_speaker(self):
+            self.default_calls += 1
+            return self.speakers[0] if self.default_calls <= 2 else self.speakers[1]
+
+        def get_microphone(self, *, id, include_loopback):
+            assert include_loopback
+            self.opened.append(id)
+            if id == "one":
+                return FakeMic(FakeRecorder(error=OSError("old stream disconnected")))
+            return FakeMic(FakeRecorder(np.full((1600, 2), 2, dtype=np.float32)))
+
+    backend = LateSwitchBackend()
+    frames = LoopbackSource(backend=backend).frames(Event())
+    try:
+        assert float(next(frames)[0]) == 2
+    finally:
+        frames.close()
+    assert backend.opened == ["one", "one", "two"]
+
+
+def test_default_loopback_retries_same_device_after_stream_restart():
+    class RestartedBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.opened = 0
+
+        def get_microphone(self, *, id, include_loopback):
+            assert id == "one" and include_loopback
+            self.opened += 1
+            if self.opened == 1:
+                return FakeMic(FakeRecorder(error=OSError("stream restarted")))
+            return FakeMic(FakeRecorder(np.ones((1600, 2), dtype=np.float32)))
+
+    backend = RestartedBackend()
+    source = LoopbackSource(backend=backend)
+    frames = source.frames(Event())
+    try:
+        assert float(next(frames)[0]) == 1
+    finally:
+        frames.close()
+    assert backend.opened == 2
+    assert source.capture_generation == 2
+
+
+def test_default_loopback_reports_persistent_capture_failure():
+    backend = FakeBackend(FakeRecorder(error=OSError("device broken")))
+    source = LoopbackSource(backend=backend)
+    source.RECONNECT_SECONDS = 0.05
+    with pytest.raises(AudioDeviceError, match="capture failed"):
+        next(source.frames(Event()))
+
+
+def test_default_loopback_waits_for_temporary_missing_default():
+    class BrieflyMissingBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.default_calls = 0
+            self.opened = []
+
+        def default_speaker(self):
+            self.default_calls += 1
+            if self.default_calls in {2, 3}:
+                return None
+            return self.speakers[0] if self.default_calls == 1 else self.speakers[1]
+
+        def get_microphone(self, *, id, include_loopback):
+            assert include_loopback
+            self.opened.append(id)
+            value = 1 if id == "one" else 2
+            return FakeMic(FakeRecorder(np.full((1600, 2), value, dtype=np.float32)))
+
+    backend = BrieflyMissingBackend()
+    frames = LoopbackSource(backend=backend, device_check_frames=1).frames(Event())
+    try:
+        assert [float(next(frames)[0]) for _ in range(2)] == [1, 2]
+    finally:
+        frames.close()
+    assert backend.opened == ["one", "two"]
+
+
+def test_default_loopback_survives_temporary_device_listing_error():
+    class BrieflyFailingBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.default_calls = 0
+            self.opened = []
+
+        def default_speaker(self):
+            self.default_calls += 1
+            if self.default_calls == 2:
+                raise RuntimeError("device list changing")
+            return self.speakers[0] if self.default_calls == 1 else self.speakers[1]
+
+        def get_microphone(self, *, id, include_loopback):
+            assert include_loopback
+            self.opened.append(id)
+            value = 1 if id == "one" else 2
+            return FakeMic(FakeRecorder(np.full((1600, 2), value, dtype=np.float32)))
+
+    backend = BrieflyFailingBackend()
+    frames = LoopbackSource(backend=backend, device_check_frames=1).frames(Event())
+    try:
+        assert [float(next(frames)[0]) for _ in range(2)] == [1, 2]
+    finally:
+        frames.close()
+    assert backend.opened == ["one", "two"]
+
+
 def test_unknown_output_device_is_recoverable_error():
     with pytest.raises(AudioDeviceError, match="unavailable"):
         next(LoopbackSource("gone", backend=FakeBackend()).frames(Event()))
@@ -98,7 +307,7 @@ def test_unknown_output_device_is_recoverable_error():
 def test_recorder_failure_is_wrapped_without_returning_stale_audio():
     backend = FakeBackend(FakeRecorder(error=OSError("device disconnected")))
     with pytest.raises(AudioDeviceError, match="capture failed"):
-        next(LoopbackSource(backend=backend).frames(Event()))
+        next(LoopbackSource("one", backend=backend).frames(Event()))
 
 
 def test_segmenter_ignores_silence_and_short_noise():

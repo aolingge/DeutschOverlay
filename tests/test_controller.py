@@ -10,6 +10,7 @@ import pytest
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from deutsch_overlay.audio import OutputDevice
 from deutsch_overlay.captions import CaptionEvent
 from deutsch_overlay.config import Settings
 from deutsch_overlay.controller import CaptionController
@@ -170,6 +171,200 @@ def test_listening_status_waits_for_first_capture_frame(qapp):
         assert any("正在监听" in status for status in statuses)
     finally:
         ready.set()
+        controller.stop()
+
+
+def test_listening_status_tracks_default_playback_device(qapp):
+    class SwitchingSource:
+        active_device = None
+
+        def frames(self, _stop):
+            for device_id, name in (("one", "Speakers"), ("two", "Headphones")):
+                self.active_device = OutputDevice(device_id, name, True)
+                yield np.zeros(1600, dtype=np.float32)
+                time.sleep(0.03)
+
+    source = SwitchingSource()
+    controller = CaptionController(
+        source_factory=lambda _device: source,
+        local_factory=FakeLocalEngine,
+        voice_detector_factory=lambda: lambda _frame: False,
+    )
+    statuses = []
+    controller.status_changed.connect(statuses.append)
+    try:
+        controller.start(Settings())
+        for _ in range(100):
+            QTest.qWait(20)
+            if any("Headphones" in status for status in statuses):
+                break
+        assert any("Speakers" in status for status in statuses)
+        assert any("Headphones" in status for status in statuses)
+    finally:
+        controller.stop()
+
+
+@pytest.mark.parametrize("same_device", [False, True])
+def test_local_device_switch_discards_unfinished_previous_speech(qapp, same_device):
+    class SwitchingSource:
+        active_device = None
+        capture_generation = 0
+
+        def frames(self, _stop):
+            self.capture_generation = 1
+            self.active_device = OutputDevice("one", "Speakers", True)
+            for _ in range(2):
+                yield np.full(1600, 0.1, dtype=np.float32)
+            self.capture_generation = 2
+            self.active_device = OutputDevice(
+                "one" if same_device else "two", "Speakers" if same_device else "Headphones", True
+            )
+            for _ in range(3):
+                yield np.full(1600, 0.2, dtype=np.float32)
+            for _ in range(4):
+                yield np.zeros(1600, dtype=np.float32)
+
+    processed = []
+
+    class RecordingEngine:
+        warning = None
+
+        def process(self, audio, *_args):
+            processed.append(audio.copy())
+            return None
+
+    class Detector:
+        resets = 0
+
+        def __call__(self, frame):
+            return bool(np.max(frame) > 0.01)
+
+        def reset(self):
+            self.resets += 1
+
+    detector = Detector()
+
+    controller = CaptionController(
+        source_factory=lambda _device: SwitchingSource(),
+        local_factory=RecordingEngine,
+        voice_detector_factory=lambda: detector,
+    )
+    try:
+        controller.start(Settings())
+        for _ in range(100):
+            QTest.qWait(20)
+            if processed:
+                break
+        assert processed
+        assert detector.resets == 1
+        assert all(not np.any(np.isclose(clip, 0.1)) for clip in processed)
+        assert any(np.any(np.isclose(clip, 0.2)) for clip in processed)
+    finally:
+        controller.stop()
+
+
+def test_online_device_switch_restarts_translation_stream(qapp):
+    class SwitchingSource:
+        active_device = None
+        capture_generation = 0
+
+        def frames(self, _stop):
+            for generation in (1, 2):
+                self.capture_generation = generation
+                self.active_device = OutputDevice("one", "Speakers", True)
+                yield np.ones(1600, dtype=np.float32)
+
+    engines = []
+
+    class RecordingEngine:
+        def __init__(self):
+            self.started = 0
+            self.frames = 0
+            self.stopped = 0
+            self.on_caption = None
+
+        def start(self, _session_id, _language, on_caption, _on_error):
+            self.started += 1
+            self.on_caption = on_caption
+
+        def push_frame(self, _frame):
+            self.frames += 1
+
+        def stop(self):
+            self.stopped += 1
+
+    def online_factory(_limit):
+        engine = RecordingEngine()
+        engines.append(engine)
+        return engine
+
+    controller = CaptionController(
+        source_factory=lambda _device: SwitchingSource(),
+        online_factory=online_factory,
+    )
+    views = []
+    controller.view_changed.connect(views.append)
+    try:
+        controller.start(replace(Settings(), mode="online"))
+        for _ in range(100):
+            QTest.qWait(20)
+            if len(engines) == 2 and engines[-1].frames and engines[-1].stopped:
+                break
+        assert len(engines) == 2
+        assert [engine.frames for engine in engines] == [1, 1]
+        assert all(engine.started == 1 for engine in engines)
+        assert all(engine.stopped == 1 for engine in engines)
+        engines[0].on_caption(CaptionEvent(controller.session_id, "old", "de", "old", None, True, time.monotonic()))
+        engines[1].on_caption(CaptionEvent(controller.session_id, "new", "de", "new", None, True, time.monotonic()))
+        QTest.qWait(30)
+        assert [view.primary for view in views] == ["new"]
+    finally:
+        controller.stop()
+
+
+def test_old_inference_result_is_not_shown_after_device_switch(qapp):
+    old_started = threading.Event()
+    release_old = threading.Event()
+
+    class SwitchingSource:
+        active_device = None
+
+        def frames(self, _stop):
+            self.active_device = OutputDevice("one", "Speakers", True)
+            for frame in speech_frames():
+                yield frame * 0.5
+            assert old_started.wait(2)
+            self.active_device = OutputDevice("two", "Headphones", True)
+            for frame in speech_frames():
+                yield frame
+            release_old.set()
+
+    class SlowEngine:
+        warning = None
+
+        def process(self, audio, _rate, session, segment, _lock):
+            text = "old" if np.max(audio) < 0.15 else "new"
+            if text == "old":
+                old_started.set()
+                assert release_old.wait(2)
+            return CaptionEvent(session, segment, "de", text, None, True, time.monotonic())
+
+    controller = CaptionController(
+        source_factory=lambda _device: SwitchingSource(),
+        local_factory=SlowEngine,
+        voice_detector_factory=lambda: lambda frame: bool(np.max(frame) > 0.01),
+    )
+    views = []
+    controller.view_changed.connect(views.append)
+    try:
+        controller.start(Settings())
+        for _ in range(100):
+            QTest.qWait(20)
+            if any(view.primary == "new" for view in views):
+                break
+        assert [view.primary for view in views] == ["new"]
+    finally:
+        release_old.set()
         controller.stop()
 
 

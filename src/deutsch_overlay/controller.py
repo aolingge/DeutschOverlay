@@ -49,6 +49,7 @@ class CaptionController(QObject):
         self.voice_detector_factory = voice_detector_factory or SileroSpeechDetector
         self._local_engine = None
         self._generation = 0
+        self._device_epoch = 0
         self._reducer = CaptionReducer(0)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -71,6 +72,7 @@ class CaptionController(QObject):
             self.status_changed.emit("旧识别会话仍在退出，请稍后再次应用设置")
             return False
         self._generation += 1
+        self._device_epoch = 0
         self._settings = settings
         self._reducer = CaptionReducer(self._generation, settings.compare_original)
         self._stop = threading.Event()
@@ -109,6 +111,8 @@ class CaptionController(QObject):
 
     @Slot(object)
     def accept_caption(self, event: CaptionEvent) -> None:
+        if event.device_epoch != self._device_epoch:
+            return
         view = self._reducer.apply(event)
         if view is not None:
             self.view_changed.emit(view)
@@ -124,8 +128,9 @@ class CaptionController(QObject):
             self.level_changed.emit(level)
 
     def _run_local(self, session_id: int, settings: Settings, stop: threading.Event) -> None:
-        clips: queue.Queue[tuple[str, object, bool]] = queue.Queue(maxsize=4)
+        clips: queue.Queue[tuple[str, object, bool, int]] = queue.Queue(maxsize=4)
         capture_done = threading.Event()
+        device_epoch = 0
         engine = self._local_engine or self.local_factory()
         self._local_engine = engine
         try:
@@ -150,14 +155,16 @@ class CaptionController(QObject):
         def infer() -> None:
             while not capture_done.is_set() or not clips.empty():
                 try:
-                    segment_id, clip, final = clips.get(timeout=0.1)
+                    segment_id, clip, final, epoch = clips.get(timeout=0.1)
                 except queue.Empty:
+                    continue
+                if epoch != device_epoch:
                     continue
                 try:
                     language = settings.language_lock if settings.language_lock != "auto" else None
                     event = engine.process(clip, 16000, session_id, segment_id, language)
-                    if event is not None:
-                        self._caption_from_worker.emit(replace(event, final=final))
+                    if event is not None and epoch == device_epoch:
+                        self._caption_from_worker.emit(replace(event, final=final, device_epoch=epoch))
                     if getattr(engine, "warning", None):
                         self._status_from_worker.emit(session_id, engine.warning)
                         engine.warning = None
@@ -168,10 +175,13 @@ class CaptionController(QObject):
 
         inference = threading.Thread(target=infer, name=f"inference-{session_id}", daemon=True)
         inference.start()
-        segmenter = SpeechSegmenter(
-            sample_rate=16000, frame_samples=1600, silence_seconds=0.3,
-            max_seconds=7.0, voice_detector=voice_detector,
-        )
+        def fresh_segmenter() -> SpeechSegmenter:
+            return SpeechSegmenter(
+                sample_rate=16000, frame_samples=1600, silence_seconds=0.3,
+                max_seconds=7.0, voice_detector=voice_detector,
+            )
+
+        segmenter = fresh_segmenter()
         level_meter = AudioLevelMeter()
         counter = 0
         last_preview_frame = 0
@@ -191,16 +201,42 @@ class CaptionController(QObject):
                 except queue.Empty:
                     pass
                 self._status_from_worker.emit(session_id, "识别速度落后，已跳过一段旧语音")
-            clips.put_nowait((segment_id, clip, final))
+            clips.put_nowait((segment_id, clip, final, device_epoch))
 
         try:
             self._status_from_worker.emit(session_id, "正在连接电脑播放设备（本地模式）")
             listening = False
-            for frame in self.source_factory(settings.output_device_id).frames(stop):
+            active_id = None
+            active_generation = None
+            source = self.source_factory(settings.output_device_id)
+            for frame in source.frames(stop):
                 if stop.is_set():
                     break
-                if not listening:
-                    self._status_from_worker.emit(session_id, "正在监听电脑播放声（本地模式）")
+                active = getattr(source, "active_device", None)
+                generation = getattr(source, "capture_generation", None)
+                changed = listening and (
+                    (active is not None and active.id != active_id)
+                    or (generation is not None and generation != active_generation)
+                )
+                if changed:
+                    device_epoch += 1
+                    self._device_epoch = device_epoch
+                    reset_detector = getattr(voice_detector, "reset", None)
+                    if reset_detector is not None:
+                        reset_detector()
+                    segmenter = fresh_segmenter()
+                    level_meter = AudioLevelMeter()
+                    while not clips.empty():
+                        try:
+                            clips.get_nowait()
+                        except queue.Empty:
+                            break
+                    last_preview_frame = 0
+                if not listening or changed:
+                    name = f"：{active.name}" if active is not None else "电脑播放声"
+                    self._status_from_worker.emit(session_id, f"正在监听{name}（本地模式）")
+                    active_id = active.id if active is not None else None
+                    active_generation = generation
                     listening = True
                 level = level_meter.push(frame)
                 if level is not None:
@@ -229,22 +265,51 @@ class CaptionController(QObject):
     def _run_online(self, session_id: int, settings: Settings, stop: threading.Event) -> None:
         engine = None
         level_meter = AudioLevelMeter()
+        device_epoch = 0
+
+        def on_caption_for(epoch: int):
+            return lambda event: self._caption_from_worker.emit(replace(event, device_epoch=epoch))
+
         try:
             engine = self.online_factory(settings.online_minutes_limit)
             language = settings.language_lock if settings.language_lock != "auto" else None
             engine.start(
                 session_id,
                 language,
-                self._caption_from_worker.emit,
+                on_caption_for(device_epoch),
                 lambda message: self._status_from_worker.emit(session_id, message),
             )
             self._status_from_worker.emit(session_id, "正在连接电脑播放设备（在线模式，可能产生费用）")
             listening = False
-            for frame in self.source_factory(settings.output_device_id).frames(stop):
+            active_id = None
+            active_generation = None
+            source = self.source_factory(settings.output_device_id)
+            for frame in source.frames(stop):
                 if stop.is_set():
                     break
-                if not listening:
-                    self._status_from_worker.emit(session_id, "正在监听电脑播放声（在线模式，可能产生费用）")
+                active = getattr(source, "active_device", None)
+                generation = getattr(source, "capture_generation", None)
+                changed = listening and (
+                    (active is not None and active.id != active_id)
+                    or (generation is not None and generation != active_generation)
+                )
+                if changed:
+                    device_epoch += 1
+                    self._device_epoch = device_epoch
+                    engine.stop()
+                    engine = self.online_factory(settings.online_minutes_limit)
+                    engine.start(
+                        session_id,
+                        language,
+                        on_caption_for(device_epoch),
+                        lambda message: self._status_from_worker.emit(session_id, message),
+                    )
+                    level_meter = AudioLevelMeter()
+                if not listening or changed:
+                    name = f"：{active.name}" if active is not None else "电脑播放声"
+                    self._status_from_worker.emit(session_id, f"正在监听{name}（在线模式，可能产生费用）")
+                    active_id = active.id if active is not None else None
+                    active_generation = generation
                     listening = True
                 level = level_meter.push(frame)
                 if level is not None:

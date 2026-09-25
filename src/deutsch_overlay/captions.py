@@ -14,6 +14,7 @@ class CaptionEvent:
     german: str | None
     final: bool
     timestamp: float
+    device_epoch: int = 0
 
 
 @dataclass(frozen=True, slots=True)

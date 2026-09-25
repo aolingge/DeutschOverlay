@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from math import ceil
 from threading import Event
+from time import monotonic
 from typing import Callable, Iterator
 
 import numpy as np
@@ -68,6 +69,8 @@ def list_output_devices(backend=None) -> list[OutputDevice]:
 class LoopbackSource:
     """Yield fixed-size mono float32 frames from one playback endpoint."""
 
+    RECONNECT_SECONDS = 5.0
+
     def __init__(
         self,
         device_id: str | None = None,
@@ -75,47 +78,94 @@ class LoopbackSource:
         backend=None,
         sample_rate: int = 16000,
         frame_samples: int = 1600,
+        device_check_frames: int = 20,
     ) -> None:
-        if sample_rate <= 0 or frame_samples <= 0:
-            raise ValueError("sample_rate and frame_samples must be positive")
+        if sample_rate <= 0 or frame_samples <= 0 or device_check_frames <= 0:
+            raise ValueError("audio frame and device check intervals must be positive")
         self.device_id = device_id
         self.backend = backend
         self.sample_rate = sample_rate
         self.frame_samples = frame_samples
+        self.device_check_frames = device_check_frames
+        self.active_device: OutputDevice | None = None
+        self.capture_generation = 0
 
     def frames(self, stop_event: Event) -> Iterator[np.ndarray]:
         backend = self.backend or _soundcard()
-        devices = list_output_devices(backend)
-        selected = next(
-            (device for device in devices if device.id == self.device_id), None
-        ) if self.device_id else next((device for device in devices if device.is_default), None)
-        if selected is None:
-            raise AudioDeviceError("selected output device is unavailable")
-        try:
-            microphone = backend.get_microphone(id=selected.id, include_loopback=True)
-            if microphone is None:
-                raise AudioDeviceError("output device has no loopback input")
-            pending = np.empty(0, dtype=np.float32)
-            with microphone.recorder(samplerate=self.sample_rate, blocksize=self.frame_samples) as recorder:
-                while not stop_event.is_set():
-                    raw = np.asarray(recorder.record(numframes=self.frame_samples), dtype=np.float32)
-                    if raw.ndim == 2:
-                        mono = raw.mean(axis=1, dtype=np.float32)
-                    elif raw.ndim == 1:
-                        mono = raw
-                    else:
-                        raise AudioDeviceError("capture returned an unsupported audio format")
-                    if not len(mono):
+        missing_since: float | None = None
+        capture_error_since: float | None = None
+        while not stop_event.is_set():
+            try:
+                devices = list_output_devices(backend)
+            except AudioDeviceError:
+                if self.device_id is not None or self.active_device is None:
+                    raise
+                devices = []
+            selected = next(
+                (device for device in devices if device.id == self.device_id), None
+            ) if self.device_id else next(
+                (device for device in devices if device.is_default), None
+            )
+            if selected is None:
+                if self.device_id is None and self.active_device is not None:
+                    missing_since = missing_since or monotonic()
+                    if monotonic() - missing_since < self.RECONNECT_SECONDS:
+                        stop_event.wait(0.1)
                         continue
-                    pending = np.concatenate((pending, mono))
-                    while len(pending) >= self.frame_samples:
-                        frame = pending[: self.frame_samples].copy()
-                        pending = pending[self.frame_samples :]
-                        yield frame
-        except AudioDeviceError:
-            raise
-        except (OSError, RuntimeError, ValueError, TypeError) as exc:
-            raise AudioDeviceError("output audio capture failed") from exc
+                raise AudioDeviceError("selected output device is unavailable")
+            missing_since = None
+            try:
+                for frame in self._capture_selected(backend, selected, stop_event):
+                    capture_error_since = None
+                    yield frame
+            except (AudioDeviceError, OSError, RuntimeError, ValueError, TypeError) as exc:
+                if stop_event.is_set():
+                    return
+                if self.device_id is None:
+                    capture_error_since = capture_error_since or monotonic()
+                    if monotonic() - capture_error_since < self.RECONNECT_SECONDS:
+                        stop_event.wait(0.1)
+                        continue
+                if isinstance(exc, AudioDeviceError):
+                    raise
+                raise AudioDeviceError("output audio capture failed") from exc
+
+    def _capture_selected(self, backend, selected: OutputDevice, stop_event: Event) -> Iterator[np.ndarray]:
+        microphone = backend.get_microphone(id=selected.id, include_loopback=True)
+        if microphone is None:
+            raise AudioDeviceError("output device has no loopback input")
+        self.active_device = selected
+        pending = np.empty(0, dtype=np.float32)
+        frames_since_check = 0
+        with microphone.recorder(samplerate=self.sample_rate, blocksize=self.frame_samples) as recorder:
+            self.capture_generation += 1
+            while not stop_event.is_set():
+                raw = np.asarray(recorder.record(numframes=self.frame_samples), dtype=np.float32)
+                if raw.ndim == 2:
+                    mono = raw.mean(axis=1, dtype=np.float32)
+                elif raw.ndim == 1:
+                    mono = raw
+                else:
+                    raise AudioDeviceError("capture returned an unsupported audio format")
+                if not len(mono):
+                    continue
+                pending = np.concatenate((pending, mono))
+                while len(pending) >= self.frame_samples:
+                    frame = pending[: self.frame_samples].copy()
+                    pending = pending[self.frame_samples :]
+                    yield frame
+                    if self.device_id is None:
+                        frames_since_check += 1
+                        if frames_since_check >= self.device_check_frames:
+                            frames_since_check = 0
+                            try:
+                                current = next(
+                                    (device for device in list_output_devices(backend) if device.is_default), None
+                                )
+                            except AudioDeviceError:
+                                return
+                            if current is None or current.id != selected.id:
+                                return
 
 
 class SileroSpeechDetector:
@@ -137,6 +187,9 @@ class SileroSpeechDetector:
         audio = np.pad(audio, (0, (-len(audio)) % 512)).astype(np.float32)
         scores = self.model(audio).reshape(-1)
         return bool(np.max(scores[-5:]) >= 0.35)
+
+    def reset(self) -> None:
+        self._recent.clear()
 
 
 class SpeechSegmenter:
