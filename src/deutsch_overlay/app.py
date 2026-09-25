@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -86,6 +87,7 @@ class DesktopApp:
         self._restart_pending = False
         self._locked = True
         self._last_view: CaptionView | None = None
+        self._last_view_received_at: float | None = None
         self.tray = QSystemTrayIcon(_tray_icon(), self.window)
         self.tray.setToolTip("Deutsch Overlay")
         self._build_tray()
@@ -110,6 +112,7 @@ class DesktopApp:
     def _connect_signals(self) -> None:
         self.controller.view_changed.connect(self._show_view)
         self.controller.status_changed.connect(self.window.set_status)
+        self.controller.level_changed.connect(self.window.set_audio_level)
         self.window.settings_changed.connect(self.apply_settings)
         self.window.credentials_submitted.connect(self.save_credentials)
         self.window.unlock_requested.connect(self.toggle_lock)
@@ -128,9 +131,25 @@ class DesktopApp:
         self._restart_pending = self.controller.start(self.settings) is False
 
     def _show_view(self, view: CaptionView) -> None:
+        if (self._last_view is None or
+                (view.session_id, view.segment_id, view.timestamp, view.final) !=
+                (self._last_view.session_id, self._last_view.segment_id,
+                 self._last_view.timestamp, self._last_view.final)):
+            self._last_view_received_at = time.monotonic()
         self._last_view = view
         if self._visible and not self._paused:
-            self.overlay.show_caption(view)
+            self._restore_recent_caption()
+
+    def _restore_recent_caption(self) -> bool:
+        if self._last_view is None or self._last_view_received_at is None:
+            return False
+        lifetime = (self.settings.fade_seconds if self._last_view.final else
+                    max(2.0, self.settings.fade_seconds))
+        remaining = lifetime - (time.monotonic() - self._last_view_received_at)
+        if remaining > 0:
+            self.overlay.show_caption(self._last_view, timeout_seconds=remaining)
+            return True
+        return False
 
     def apply_settings(self, updated: Settings) -> bool:
         previous = self.settings
@@ -151,6 +170,7 @@ class DesktopApp:
         if (pipeline_changed or self._restart_pending) and not self._paused:
             self.overlay.hide_caption()
             self._last_view = None
+            self._last_view_received_at = None
             self._restart_pending = self.controller.start(updated) is False
         elif not pipeline_changed and not self._restart_pending:
             self.window.set_status("设置已保存")
@@ -171,9 +191,16 @@ class DesktopApp:
         self._visible = not self._visible
         if not self._visible:
             self.overlay.hide_caption()
-        elif not self._paused and self._last_view is not None:
-            self.overlay.show_caption(self._last_view)
-        self.window.set_status("字幕已显示" if self._visible else "字幕已隐藏")
+            self.window.set_status("字幕已隐藏")
+        elif not self._locked:
+            self._show_position_hint()
+            self.window.set_status("字幕已显示；拖动字幕条调整位置")
+        elif self._paused:
+            self.window.set_status("字幕显示已开启；识别已暂停")
+        elif self._restore_recent_caption():
+            self.window.set_status("字幕已显示")
+        else:
+            self.window.set_status("字幕显示已开启，等待下一句")
 
     def cycle_language(self) -> None:
         choices = ("auto", "de", "en", "zh")
@@ -185,6 +212,7 @@ class DesktopApp:
         if self._paused:
             self.overlay.hide_caption()
             self._last_view = None
+            self._last_view_received_at = None
             self.controller.pause(True)
         else:
             self._restart_pending = self.controller.start(self.settings) is False
@@ -194,10 +222,17 @@ class DesktopApp:
         self.overlay.set_locked(self._locked)
         if self._locked:
             self.overlay.hide_caption()
+            if self._visible and not self._paused:
+                self._restore_recent_caption()
             self.window.set_status("字幕位置已锁定")
-        else:
-            self.overlay.show_caption(CaptionView(0, "position", "拖动字幕条调整位置", None, False, 0))
+        elif self._visible:
+            self._show_position_hint()
             self.window.set_status("拖动字幕条到想要的位置，完成后再次锁定")
+        else:
+            self.window.set_status("字幕位置已解锁；显示字幕后可拖动")
+
+    def _show_position_hint(self) -> None:
+        self.overlay.show_caption(CaptionView(0, "position", "拖动字幕条调整位置", None, False, 0))
 
     def _save_position(self, x: int, y: int) -> None:
         self.apply_settings(replace(self.settings, overlay_x=x, overlay_y=y, overlay_position="custom"))

@@ -137,6 +137,7 @@ def test_long_german_speech_shows_local_preview_before_sentence_ends(local_engin
 
     from deutsch_overlay.config import Settings
     from deutsch_overlay.controller import CaptionController
+    from deutsch_overlay.overlay import CaptionOverlay
 
     wav_path = tmp_path / "long_german.wav"
     synthesize_wav(
@@ -166,9 +167,11 @@ def test_long_german_speech_shows_local_preview_before_sentence_ends(local_engin
         source_factory=lambda _device: RecordedSpeechSource(),
         local_factory=lambda: local_engine,
     )
+    overlay = CaptionOverlay(Settings(fade_seconds=8))
     captions = []
     statuses = []
     controller.view_changed.connect(lambda view: captions.append((time.monotonic(), view)))
+    controller.view_changed.connect(overlay.show_caption)
     controller.status_changed.connect(statuses.append)
     try:
         assert controller.start(Settings(language_lock="de"))
@@ -180,5 +183,10 @@ def test_long_german_speech_shows_local_preview_before_sentence_ends(local_engin
         assert playback_finished, (statuses, captions)
         assert any(not view.final and at < playback_finished[0] for at, view in captions), captions
         assert any(view.final and "deutsche" in view.primary.lower() for _, view in captions), captions
+        final_text = " ".join(view.primary for _, view in captions if view.final)
+        assert "interessante Wörter" in final_text, final_text
+        assert overlay.isVisible()
+        assert overlay.primary_label.text() == captions[-1][1].primary
     finally:
         controller.stop()
+        overlay.close()

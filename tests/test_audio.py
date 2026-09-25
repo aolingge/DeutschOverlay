@@ -5,10 +5,23 @@ import pytest
 
 from deutsch_overlay.audio import (
     AudioDeviceError,
+    AudioLevelMeter,
     LoopbackSource,
     SpeechSegmenter,
     list_output_devices,
 )
+
+
+def test_audio_level_meter_reports_signal_then_silence():
+    meter = AudioLevelMeter(frames_per_update=3)
+    silence = np.zeros(1600, dtype=np.float32)
+    voice = np.full(1600, 0.2, dtype=np.float32)
+    assert meter.push(silence) is None
+    assert meter.push(voice) is None
+    assert meter.push(silence) == pytest.approx(0.2)
+    assert meter.push(silence) is None
+    assert meter.push(silence) is None
+    assert meter.push(silence) == 0.0
 
 
 class FakeSpeaker:

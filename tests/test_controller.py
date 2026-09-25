@@ -60,6 +60,57 @@ def test_local_audio_reaches_caption_view(qapp):
     assert views and views[0].primary == "Guten Tag"
 
 
+def test_audio_level_updates_are_emitted_and_old_sessions_are_ignored(qapp):
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource([
+            np.full(1600, 0.2, dtype=np.float32) for _ in range(5)
+        ]),
+        local_factory=FakeLocalEngine,
+        voice_detector_factory=lambda: lambda _frame: False,
+    )
+    levels = []
+    controller.level_changed.connect(levels.append)
+    try:
+        controller.start(Settings())
+        for _ in range(50):
+            QTest.qWait(20)
+            if any(isinstance(level, float) and level > 0.1 for level in levels):
+                break
+        assert any(isinstance(level, float) and level > 0.1 for level in levels)
+        old_id = controller.session_id
+        controller.start(Settings())
+        before = len(levels)
+        controller._level_from_worker.emit(old_id, 0.9)
+        QTest.qWait(20)
+        assert len(levels) == before
+    finally:
+        controller.stop()
+
+
+def test_audio_level_returns_to_waiting_when_capture_ends(qapp):
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource([
+            np.full(1600, 0.2, dtype=np.float32) for _ in range(5)
+        ]),
+        local_factory=FakeLocalEngine,
+        voice_detector_factory=lambda: lambda _frame: False,
+    )
+    levels = []
+    controller.level_changed.connect(levels.append)
+    try:
+        controller.start(Settings())
+        for _ in range(50):
+            QTest.qWait(20)
+            if (not controller.running and
+                    any(isinstance(level, float) and level > 0.1 for level in levels) and
+                    levels[-1] is None):
+                break
+        assert any(isinstance(level, float) and level > 0.1 for level in levels)
+        assert levels[-1] is None
+    finally:
+        controller.stop()
+
+
 def test_long_local_speech_shows_provisional_then_final_caption(qapp):
     voice = np.full(1600, 0.2, dtype=np.float32)
     silence = np.zeros(1600, dtype=np.float32)

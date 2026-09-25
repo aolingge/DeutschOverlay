@@ -24,6 +24,7 @@ def qapp():
 class FakeController(QObject):
     view_changed = Signal(object)
     status_changed = Signal(str)
+    level_changed = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -96,6 +97,23 @@ def test_cloud_credentials_are_saved_only_by_explicit_form_action(qapp, tmp_path
     runtime.shutdown()
 
 
+def test_audio_input_state_is_visible_in_settings(qapp, tmp_path):
+    controller = FakeController()
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=controller,
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        controller.level_changed.emit(0.0)
+        assert "未检测到" in runtime.window.audio_level_label.text()
+        controller.level_changed.emit(0.1)
+        assert "正在接收" in runtime.window.audio_level_label.text()
+        controller.level_changed.emit(None)
+        assert "等待" in runtime.window.audio_level_label.text()
+    finally:
+        runtime.shutdown()
+
+
 def test_loaded_online_setting_is_local_for_new_session(qapp, tmp_path):
     path = tmp_path / "settings.json"
     save_settings(path, Settings(mode="online"))
@@ -156,6 +174,106 @@ def test_controller_caption_reaches_overlay_and_visibility_restores_last_caption
         runtime.toggle_visibility()
         assert runtime.overlay.isVisible()
         assert runtime.overlay.primary_label.text() == "Guten Tag"
+    finally:
+        runtime.shutdown()
+
+
+def test_hidden_caption_does_not_return_after_its_display_time_expires(qapp, tmp_path):
+    from PySide6.QtTest import QTest
+
+    path = tmp_path / "settings.json"
+    save_settings(path, Settings(fade_seconds=0.02))
+    controller = FakeController()
+    runtime = DesktopApp(
+        qapp, settings_path=path, controller=controller,
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        controller.view_changed.emit(CaptionView(1, "caption", "Guten Tag", None, True, 1.0))
+        qapp.processEvents()
+        runtime.toggle_visibility()
+        QTest.qWait(80)
+        runtime.toggle_visibility()
+        assert not runtime.overlay.isVisible()
+        assert "等待下一句" in runtime.window.status_label.text()
+    finally:
+        runtime.shutdown()
+
+
+def test_restored_caption_keeps_only_its_remaining_display_time(qapp, tmp_path):
+    from PySide6.QtTest import QTest
+
+    path = tmp_path / "settings.json"
+    save_settings(path, Settings(fade_seconds=0.16))
+    runtime = DesktopApp(
+        qapp, settings_path=path, controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        view = CaptionView(1, "caption", "Guten Tag", None, True, 1.0)
+        runtime._show_view(view)
+        runtime.toggle_visibility()
+        QTest.qWait(100)
+        runtime.toggle_visibility()
+        assert runtime.overlay.isVisible()
+        QTest.qWait(90)
+        assert not runtime.overlay.isVisible()
+        runtime._show_view(view)  # The same segment may be re-rendered when comparison changes.
+        assert not runtime.overlay.isVisible()
+    finally:
+        runtime.shutdown()
+
+
+def test_final_caption_restarts_display_time_after_provisional_with_same_timestamp(qapp, tmp_path):
+    from PySide6.QtTest import QTest
+
+    path = tmp_path / "settings.json"
+    save_settings(path, Settings(fade_seconds=0.12))
+    runtime = DesktopApp(
+        qapp, settings_path=path, controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime._show_view(CaptionView(1, "same", "Guten", None, False, 1.0))
+        QTest.qWait(60)
+        runtime._show_view(CaptionView(1, "same", "Guten Tag", None, True, 1.0))
+        runtime.toggle_visibility()
+        QTest.qWait(80)
+        runtime.toggle_visibility()
+        assert runtime.overlay.isVisible()
+        assert runtime.overlay.primary_label.text() == "Guten Tag"
+    finally:
+        runtime.shutdown()
+
+
+def test_locking_position_restores_recent_caption(qapp, tmp_path):
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime._show_view(CaptionView(1, "caption", "Guten Tag", None, True, 1.0))
+        runtime.toggle_lock()
+        assert "拖动字幕条" in runtime.overlay.primary_label.text()
+        runtime.toggle_lock()
+        assert runtime.overlay.isVisible()
+        assert runtime.overlay.primary_label.text() == "Guten Tag"
+    finally:
+        runtime.shutdown()
+
+
+def test_unlocking_position_while_hidden_keeps_overlay_hidden(qapp, tmp_path):
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.toggle_visibility()
+        runtime.toggle_lock()
+        assert not runtime.overlay.isVisible()
+        runtime.toggle_visibility()
+        assert runtime.overlay.isVisible()
+        assert "拖动字幕条" in runtime.overlay.primary_label.text()
     finally:
         runtime.shutdown()
 

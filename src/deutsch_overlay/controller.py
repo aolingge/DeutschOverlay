@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from deutsch_overlay.audio import LoopbackSource, SileroSpeechDetector, SpeechSegmenter
+from deutsch_overlay.audio import AudioLevelMeter, LoopbackSource, SileroSpeechDetector, SpeechSegmenter
 from deutsch_overlay.captions import CaptionEvent, CaptionReducer
 from deutsch_overlay.config import Settings
 from deutsch_overlay.credentials import AzureCredentialStore
@@ -36,8 +36,10 @@ class CaptionController(QObject):
     LOCAL_PREVIEW_FRAMES = 20
     view_changed = Signal(object)
     status_changed = Signal(str)
+    level_changed = Signal(object)
     _caption_from_worker = Signal(object)
     _status_from_worker = Signal(int, str)
+    _level_from_worker = Signal(int, object)
 
     def __init__(self, *, source_factory=None, local_factory=None, online_factory=None, voice_detector_factory=None) -> None:
         super().__init__()
@@ -53,6 +55,7 @@ class CaptionController(QObject):
         self._settings = Settings()
         self._caption_from_worker.connect(self.accept_caption)
         self._status_from_worker.connect(self._accept_status)
+        self._level_from_worker.connect(self._accept_audio_level)
 
     @property
     def session_id(self) -> int:
@@ -85,6 +88,7 @@ class CaptionController(QObject):
         self._stop.set()
         self._generation += 1
         self._reducer = CaptionReducer(self._generation, self._settings.compare_original)
+        self.level_changed.emit(None)
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=self.STOP_JOIN_SECONDS)
         if not self.running:
@@ -113,6 +117,11 @@ class CaptionController(QObject):
     def _accept_status(self, session_id: int, message: str) -> None:
         if session_id == self._generation:
             self.status_changed.emit(message)
+
+    @Slot(int, object)
+    def _accept_audio_level(self, session_id: int, level: float | None) -> None:
+        if session_id == self._generation:
+            self.level_changed.emit(level)
 
     def _run_local(self, session_id: int, settings: Settings, stop: threading.Event) -> None:
         clips: queue.Queue[tuple[str, object, bool]] = queue.Queue(maxsize=4)
@@ -161,8 +170,9 @@ class CaptionController(QObject):
         inference.start()
         segmenter = SpeechSegmenter(
             sample_rate=16000, frame_samples=1600, silence_seconds=0.3,
-            max_seconds=5.0, voice_detector=voice_detector,
+            max_seconds=7.0, voice_detector=voice_detector,
         )
+        level_meter = AudioLevelMeter()
         counter = 0
         last_preview_frame = 0
 
@@ -192,6 +202,9 @@ class CaptionController(QObject):
                 if not listening:
                     self._status_from_worker.emit(session_id, "正在监听电脑播放声（本地模式）")
                     listening = True
+                level = level_meter.push(frame)
+                if level is not None:
+                    self._level_from_worker.emit(session_id, level)
                 completed = segmenter.push(frame)
                 for clip in completed:
                     queue_clip(clip)
@@ -210,10 +223,12 @@ class CaptionController(QObject):
             self._status_from_worker.emit(session_id, f"电脑声音采集失败：{exc}")
         finally:
             capture_done.set()
+            self._level_from_worker.emit(session_id, None)
             inference.join()
 
     def _run_online(self, session_id: int, settings: Settings, stop: threading.Event) -> None:
         engine = None
+        level_meter = AudioLevelMeter()
         try:
             engine = self.online_factory(settings.online_minutes_limit)
             language = settings.language_lock if settings.language_lock != "auto" else None
@@ -231,11 +246,15 @@ class CaptionController(QObject):
                 if not listening:
                     self._status_from_worker.emit(session_id, "正在监听电脑播放声（在线模式，可能产生费用）")
                     listening = True
+                level = level_meter.push(frame)
+                if level is not None:
+                    self._level_from_worker.emit(session_id, level)
                 engine.push_frame(frame)
         except (OnlineUnavailable, OnlineLimitReached) as exc:
             self._status_from_worker.emit(session_id, f"在线识别停止：{exc}")
         except Exception:
             self._status_from_worker.emit(session_id, "在线识别停止：请检查网络或服务状态")
         finally:
+            self._level_from_worker.emit(session_id, None)
             if engine is not None:
                 engine.stop()

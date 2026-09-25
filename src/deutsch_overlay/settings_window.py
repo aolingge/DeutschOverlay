@@ -70,6 +70,9 @@ class SettingsWindow(QWidget):
         device_row.addWidget(self.device_combo)
         device_row.addWidget(refresh_button)
         form.addRow("电脑声音", device_row)
+        self.audio_level_label = QLabel("等待声音采集")
+        self.audio_level_label.setWordWrap(True)
+        form.addRow("输入状态", self.audio_level_label)
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("本地（默认）", "local")
@@ -291,6 +294,14 @@ class SettingsWindow(QWidget):
 
     def set_status(self, message: str) -> None:
         self.status_label.setText(message)
+
+    def set_audio_level(self, level: float | None) -> None:
+        if level is None:
+            self.audio_level_label.setText("等待声音采集")
+        elif level < 0.003:
+            self.audio_level_label.setText("未检测到电脑播放声；播放视频后仍如此，请检查播放设备和系统音量")
+        else:
+            self.audio_level_label.setText("正在接收电脑播放声")
 
     def update_settings(self, settings: Settings) -> None:
         self._settings = settings

@@ -22,6 +22,30 @@ class OutputDevice:
     is_default: bool
 
 
+class AudioLevelMeter:
+    """Summarize short capture windows for the user-facing input indicator."""
+
+    def __init__(self, *, frames_per_update: int = 5) -> None:
+        if frames_per_update <= 0:
+            raise ValueError("frames_per_update must be positive")
+        self.frames_per_update = frames_per_update
+        self._frames = 0
+        self._peak_rms = 0.0
+
+    def push(self, frame: np.ndarray) -> float | None:
+        if frame.size == 0:
+            raise ValueError("audio frame must not be empty")
+        rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32))))
+        self._peak_rms = max(self._peak_rms, rms)
+        self._frames += 1
+        if self._frames < self.frames_per_update:
+            return None
+        level = self._peak_rms
+        self._frames = 0
+        self._peak_rms = 0.0
+        return level
+
+
 def _soundcard():
     import soundcard
 
