@@ -158,7 +158,10 @@ class CaptionController(QObject):
 
         inference = threading.Thread(target=infer, name=f"inference-{session_id}", daemon=True)
         inference.start()
-        segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600, voice_detector=voice_detector)
+        segmenter = SpeechSegmenter(
+            sample_rate=16000, frame_samples=1600, silence_seconds=0.3,
+            max_seconds=5.0, voice_detector=voice_detector,
+        )
         counter = 0
 
         def queue_clip(clip) -> None:

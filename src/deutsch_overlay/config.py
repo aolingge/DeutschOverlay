@@ -22,6 +22,7 @@ class Settings:
     output_device_id: str | None = None
     overlay_x: int | None = None
     overlay_y: int | None = None
+    overlay_position: str = "bottom-center"
     overlay_width: int = 840
     font_size: int = 28
     opacity: float = 0.82
@@ -41,6 +42,12 @@ class Settings:
             value = getattr(self, name)
             if value is not None and type(value) is not int:
                 raise ConfigError(f"{name} must be an integer or null")
+        if type(self.overlay_position) is not str or self.overlay_position not in {
+            "top-left", "top-center", "top-right",
+            "middle-left", "middle-center", "middle-right",
+            "bottom-left", "bottom-center", "bottom-right", "custom",
+        }:
+            raise ConfigError("overlay_position is invalid")
         if type(self.overlay_width) is not int or not 240 <= self.overlay_width <= 3840:
             raise ConfigError("overlay_width must be between 240 and 3840")
         if type(self.font_size) is not int or not 12 <= self.font_size <= 72:
@@ -63,6 +70,8 @@ def load_settings(path: Path) -> Settings:
         raise ConfigError("settings file could not be read") from exc
     if not isinstance(data, dict):
         raise ConfigError("settings file must contain an object")
+    if "overlay_position" not in data and data.get("overlay_x") is not None and data.get("overlay_y") is not None:
+        data["overlay_position"] = "custom"
     try:
         return Settings(**data)
     except TypeError as exc:

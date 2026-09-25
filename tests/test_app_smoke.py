@@ -115,6 +115,25 @@ def test_device_refresh_and_reset_position(qapp, tmp_path, monkeypatch):
     runtime.apply_settings(replace(runtime.settings, overlay_x=500, overlay_y=500))
     runtime.reset_position()
     assert runtime.settings.overlay_x is None and runtime.settings.overlay_y is None
+    assert runtime.settings.overlay_position == "bottom-center"
+    runtime.shutdown()
+
+
+def test_display_mode_and_position_choices_save_without_restarting_audio(qapp, tmp_path):
+    controller = FakeController()
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=controller,
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    runtime.window.subtitle_combo.setCurrentIndex(runtime.window.subtitle_combo.findData(True))
+    runtime.window.position_combo.setCurrentIndex(runtime.window.position_combo.findData("top-right"))
+    runtime.window._apply()
+    saved = load_settings(runtime.settings_path)
+    assert saved.compare_original is True
+    assert saved.overlay_position == "top-right"
+    assert controller.started == []
+    runtime._save_position(25, 35)
+    assert load_settings(runtime.settings_path).overlay_position == "custom"
     runtime.shutdown()
 
 

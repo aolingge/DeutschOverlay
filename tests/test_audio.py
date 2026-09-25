@@ -113,6 +113,17 @@ def test_segmenter_emits_speech_after_trailing_silence():
     assert len(outputs[0]) >= 3 * 1600
 
 
+def test_shorter_trailing_silence_emits_caption_clip_earlier():
+    segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600, silence_seconds=0.3)
+    voice = np.full(1600, 0.15, dtype=np.float32)
+    silence = np.zeros(1600, dtype=np.float32)
+    for _ in range(3):
+        assert segmenter.push(voice) == []
+    assert segmenter.push(silence) == []
+    assert segmenter.push(silence) == []
+    assert len(segmenter.push(silence)) == 1
+
+
 def test_segmenter_bounds_long_speech():
     segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600, max_seconds=0.5)
     voice = np.full(1600, 0.15, dtype=np.float32)

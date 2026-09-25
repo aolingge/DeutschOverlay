@@ -29,6 +29,14 @@ def test_comparison_toggles_without_new_engine_result():
     assert reducer.set_compare_original(False).secondary is None
 
 
+def test_chinese_video_can_switch_between_german_only_and_bilingual():
+    reducer = CaptionReducer(session_id=1)
+    view = reducer.apply(event("zh", "你好，欢迎来到这里", "Hallo, willkommen hier"))
+    assert (view.primary, view.secondary) == ("Hallo, willkommen hier", None)
+    bilingual = reducer.set_compare_original(True)
+    assert (bilingual.primary, bilingual.secondary) == ("Hallo, willkommen hier", "你好，欢迎来到这里")
+
+
 def test_same_segment_updates_one_caption_and_ignores_repeated_event():
     reducer = CaptionReducer(session_id=1)
     first = reducer.apply(event(original="Gute", final=False))

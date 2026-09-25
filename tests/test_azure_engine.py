@@ -147,6 +147,7 @@ class FakeRecognizer:
     def __init__(self, **options):
         self.options = options
         self.recognized = FakeSignal()
+        self.recognizing = FakeSignal()
         self.canceled = FakeSignal()
 
     def start_continuous_recognition_async(self):
@@ -166,7 +167,7 @@ def fake_sdk():
             AudioConfig=lambda **kw: kw,
         ),
         PropertyId=SimpleNamespace(SpeechServiceConnection_LanguageIdMode="language-mode"),
-        ResultReason=SimpleNamespace(TranslatedSpeech="translated"),
+        ResultReason=SimpleNamespace(TranslatedSpeech="translated", TranslatingSpeech="translating"),
         AutoDetectSourceLanguageResult=lambda result: SimpleNamespace(language=result.language),
     )
 
@@ -210,4 +211,39 @@ def test_online_language_lock_skips_auto_detection(tmp_path):
     options = engine._recognizer.options
     assert options["translation_config"].speech_recognition_language == "de-DE"
     assert "auto_detect_source_language_config" not in options
+    engine.stop()
+
+
+def test_locked_chinese_online_stream_shows_provisional_then_final_translation(tmp_path):
+    class Store:
+        def get(self):
+            return AzureCredentials("eastasia", "a" * 32)
+
+    captions = []
+    engine = AzureEngine(Store(), OnlineBudget(tmp_path / "usage.json", 1), sdk=fake_sdk())
+    engine.start(1, "zh", captions.append, lambda _error: None)
+    engine._recognizer.recognizing.emit(SimpleNamespace(
+        reason="translating", text="你好", translations={"de": "Hallo"},
+    ))
+    engine._recognizer.recognized.emit(SimpleNamespace(
+        reason="translated", text="你好，世界", translations={"de": "Hallo, Welt"},
+    ))
+    assert [(item.german, item.final) for item in captions] == [("Hallo", False), ("Hallo, Welt", True)]
+    assert captions[0].segment_id == captions[1].segment_id
+    engine.stop()
+
+
+def test_online_no_match_discards_provisional_segment(tmp_path):
+    class Store:
+        def get(self):
+            return AzureCredentials("eastasia", "a" * 32)
+
+    engine = AzureEngine(Store(), OnlineBudget(tmp_path / "usage.json", 1), sdk=fake_sdk())
+    engine.start(1, "zh", lambda _caption: None, lambda _error: None)
+    engine._recognizer.recognizing.emit(SimpleNamespace(
+        reason="translating", text="你好", translations={"de": "Hallo"},
+    ))
+    assert engine._partial_segment_id is not None
+    engine._recognizer.recognized.emit(SimpleNamespace(reason="no-match"))
+    assert engine._partial_segment_id is None
     engine.stop()

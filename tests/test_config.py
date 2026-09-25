@@ -11,6 +11,7 @@ def test_missing_settings_file_uses_private_local_defaults(tmp_path):
     assert settings.language_lock == "auto"
     assert settings.compare_original is False
     assert settings.online_minutes_limit == 30
+    assert settings.overlay_position == "bottom-center"
 
 
 def test_settings_round_trip_omits_credentials(tmp_path):
@@ -22,6 +23,7 @@ def test_settings_round_trip_omits_credentials(tmp_path):
         output_device_id="speaker-1",
         overlay_x=42,
         overlay_y=88,
+        overlay_position="custom",
         overlay_width=750,
         font_size=26,
         opacity=0.8,
@@ -44,6 +46,8 @@ def test_settings_round_trip_omits_credentials(tmp_path):
         {"fade_seconds": -1},
         {"online_minutes_limit": 0},
         {"overlay_width": 10},
+        {"overlay_position": "outside"},
+        {"overlay_position": []},
     ],
 )
 def test_invalid_settings_are_rejected(kwargs):
@@ -63,3 +67,11 @@ def test_unknown_settings_are_rejected(tmp_path):
     path.write_text('{"credential": "should-not-load"}', encoding="utf-8")
     with pytest.raises(ConfigError, match="unsupported"):
         load_settings(path)
+
+
+def test_old_saved_coordinates_remain_custom_position(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"overlay_x": 42, "overlay_y": 88}', encoding="utf-8")
+    settings = load_settings(path)
+    assert settings.overlay_position == "custom"
+    assert (settings.overlay_x, settings.overlay_y) == (42, 88)

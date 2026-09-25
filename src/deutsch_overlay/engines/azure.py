@@ -95,7 +95,9 @@ class OnlineBudget:
                 temp_path.unlink(missing_ok=True)
 
 
-def caption_from_azure_result(result, session_id: int, segment_id: str, language: str) -> CaptionEvent | None:
+def caption_from_azure_result(
+    result, session_id: int, segment_id: str, language: str, *, final: bool = True
+) -> CaptionEvent | None:
     code = language.lower().split("-")[0]
     if code not in {"de", "en", "zh"}:
         return None
@@ -107,7 +109,7 @@ def caption_from_azure_result(result, session_id: int, segment_id: str, language
         german = (result.translations.get("de") or "").strip()
         if not german:
             return None
-    return CaptionEvent(session_id, segment_id, code, original, german, True, time.monotonic())
+    return CaptionEvent(session_id, segment_id, code, original, german, final, time.monotonic())
 
 
 class AzureEngine:
@@ -123,6 +125,7 @@ class AzureEngine:
         self._on_caption = None
         self._on_error = None
         self._sequence = 0
+        self._partial_segment_id: str | None = None
         self._interrupted = Event()
 
     def start(self, session_id: int, language_lock: str | None, on_caption, on_error) -> None:
@@ -162,9 +165,12 @@ class AzureEngine:
             options["auto_detect_source_language_config"] = autodetect
         self._recognizer = sdk.translation.TranslationRecognizer(**options)
         self._session_id = session_id
+        self._partial_segment_id = None
         self._on_caption = on_caption
         self._on_error = on_error
         self._recognizer.recognized.connect(self._recognized)
+        if self._language_lock:
+            self._recognizer.recognizing.connect(self._recognizing)
         self._recognizer.canceled.connect(self._canceled)
         try:
             self._recognizer.start_continuous_recognition_async().get()
@@ -190,18 +196,38 @@ class AzureEngine:
             self.stop()
             raise OnlineUnavailable("Azure audio stream failed") from exc
 
+    def _recognizing(self, event) -> None:
+        if self._interrupted.is_set() or not self._active or not self._language_lock:
+            return
+        result = event.result
+        if result.reason != self.sdk.ResultReason.TranslatingSpeech:
+            return
+        segment_id = self._partial_segment_id or f"online-{self._sequence + 1}"
+        caption = caption_from_azure_result(
+            result, self._session_id, segment_id, self._language_lock, final=False
+        )
+        if caption is not None:
+            if self._partial_segment_id is None:
+                self._sequence += 1
+                self._partial_segment_id = segment_id
+            self._on_caption(caption)
+
     def _recognized(self, event) -> None:
         if self._interrupted.is_set() or not self._active:
             return
         result = event.result
         if result.reason != self.sdk.ResultReason.TranslatedSpeech:
+            self._partial_segment_id = None
             return
         if self._language_lock:
             language = self._language_lock
         else:
             language = self.sdk.AutoDetectSourceLanguageResult(result).language
-        self._sequence += 1
-        segment_id = str(getattr(result, "result_id", self._sequence))
+        segment_id = self._partial_segment_id
+        self._partial_segment_id = None
+        if segment_id is None:
+            self._sequence += 1
+            segment_id = f"online-{self._sequence}"
         caption = caption_from_azure_result(result, self._session_id, segment_id, language)
         if caption is not None:
             self._on_caption(caption)
@@ -215,6 +241,7 @@ class AzureEngine:
     def stop(self) -> None:
         was_active = self._active
         self._active = False
+        self._partial_segment_id = None
         if was_active and self._recognizer is not None:
             try:
                 self._recognizer.stop_continuous_recognition_async().get()

@@ -44,7 +44,7 @@ def test_lock_mode_passes_mouse_input_through(qapp):
 
 
 def test_overlay_position_and_style_are_applied(qapp):
-    settings = Settings(overlay_x=31, overlay_y=53, overlay_width=730, font_size=23)
+    settings = Settings(overlay_x=31, overlay_y=53, overlay_position="custom", overlay_width=730, font_size=23)
     overlay = CaptionOverlay(settings)
     assert (overlay.x(), overlay.y(), overlay.width()) == (31, 53, 730)
     assert overlay.primary_label.font().pointSize() == 23
@@ -72,8 +72,47 @@ def test_long_caption_grows_to_fit_wrapped_text(qapp):
 
 def test_saved_position_near_monitor_edge_is_clamped(qapp):
     rect = QGuiApplication.primaryScreen().availableGeometry()
-    overlay = CaptionOverlay(Settings(overlay_x=rect.right() - 5, overlay_y=rect.top(), overlay_width=240))
+    overlay = CaptionOverlay(Settings(overlay_x=rect.right() - 5, overlay_y=rect.top(), overlay_position="custom", overlay_width=240))
     assert overlay.x() + overlay.width() <= rect.right() + 1
+    overlay.close()
+
+
+def test_position_preset_overrides_stale_saved_coordinates(qapp):
+    rect = QGuiApplication.primaryScreen().availableGeometry()
+    overlay = CaptionOverlay(Settings(overlay_position="top-left", overlay_x=500, overlay_y=500, overlay_width=240))
+    assert (overlay.x(), overlay.y()) == (rect.left() + 45, rect.top() + 55)
+    overlay.close()
+
+
+def test_interim_caption_expires_when_no_final_result_arrives(qapp):
+    from PySide6.QtTest import QTest
+
+    overlay = CaptionOverlay(Settings(fade_seconds=0))
+    overlay.show_caption(CaptionView(1, "interim", "Hallo", None, False, 1.0))
+    assert overlay.isVisible()
+    overlay._hide_timer.setInterval(20)
+    QTest.qWait(50)
+    assert not overlay.isVisible()
+    overlay.close()
+
+
+@pytest.mark.parametrize("position", ["top-left", "top-center", "middle-center", "bottom-right"])
+def test_position_presets_anchor_caption_to_screen(qapp, position):
+    rect = QGuiApplication.primaryScreen().availableGeometry()
+    overlay = CaptionOverlay(Settings(overlay_position=position, overlay_width=240))
+    overlay.show_caption(view("原文"))
+    if "left" in position:
+        assert overlay.x() == rect.left() + 45
+    if "center" == position.split("-")[1]:
+        assert abs((overlay.x() + overlay.width() // 2) - rect.center().x()) <= 1
+    if "right" in position:
+        assert overlay.x() + overlay.width() == rect.right() - 44
+    if position.startswith("top"):
+        assert overlay.y() == rect.top() + 55
+    if position.startswith("middle"):
+        assert abs((overlay.y() + overlay.height() // 2) - rect.center().y()) <= 1
+    if position.startswith("bottom"):
+        assert overlay.y() + overlay.height() == rect.bottom() - 55
     overlay.close()
 
 

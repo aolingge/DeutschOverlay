@@ -101,17 +101,21 @@ class CaptionOverlay(QWidget):
         if screen is None:
             return
         x, y = self._settings.overlay_x, self._settings.overlay_y
+        custom = self._settings.overlay_position == "custom"
         target = next(
             (candidate for candidate in QGuiApplication.screens()
-             if x is not None and y is not None and candidate.availableGeometry().contains(QPoint(x, y))),
+             if custom and x is not None and y is not None and candidate.availableGeometry().contains(QPoint(x, y))),
             None,
         )
         if target is None:
             target = screen
         rect = target.availableGeometry()
-        if x is None or y is None or target is screen and not rect.contains(QPoint(x, y)):
-            x = rect.center().x() - self.width() // 2
-            y = rect.bottom() - self.height() - 55
+        if not custom or x is None or y is None or (target is screen and not rect.contains(QPoint(x, y))):
+            vertical, horizontal = self._settings.overlay_position.split("-") if not custom else ("bottom", "center")
+            x = {"left": rect.left() + 45, "center": rect.center().x() - self.width() // 2,
+                 "right": rect.right() - self.width() - 44}[horizontal]
+            y = {"top": rect.top() + 55, "middle": rect.center().y() - self.height() // 2,
+                 "bottom": rect.bottom() - self.height() - 55}[vertical]
         x = max(rect.left(), min(x, rect.right() - self.width() + 1))
         y = max(rect.top(), min(y, rect.bottom() - self.height() + 1))
         self.move(x, y)
@@ -124,8 +128,8 @@ class CaptionOverlay(QWidget):
         self.show()
         self.raise_()
         self._hide_timer.stop()
-        if view.final:
-            self._hide_timer.start(max(1, round(self._settings.fade_seconds * 1000)))
+        timeout = self._settings.fade_seconds if view.final else max(2.0, self._settings.fade_seconds)
+        self._hide_timer.start(max(1, round(timeout * 1000)))
 
     def hide_caption(self) -> None:
         self._hide_timer.stop()

@@ -192,7 +192,7 @@ class DesktopApp:
             self.window.set_status("拖动字幕条到想要的位置，完成后再次锁定")
 
     def _save_position(self, x: int, y: int) -> None:
-        self.apply_settings(replace(self.settings, overlay_x=x, overlay_y=y))
+        self.apply_settings(replace(self.settings, overlay_x=x, overlay_y=y, overlay_position="custom"))
 
     def refresh_devices(self) -> None:
         try:
@@ -204,7 +204,7 @@ class DesktopApp:
         self.window.set_status("播放设备列表已刷新；选择后点击应用设置")
 
     def reset_position(self) -> None:
-        self.apply_settings(replace(self.settings, overlay_x=None, overlay_y=None))
+        self.apply_settings(replace(self.settings, overlay_x=None, overlay_y=None, overlay_position="bottom-center"))
         self.window.set_status("字幕位置已恢复到屏幕下方")
 
     def _show_model_help(self) -> None:

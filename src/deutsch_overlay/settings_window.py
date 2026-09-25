@@ -6,7 +6,6 @@ from dataclasses import replace
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -35,7 +34,7 @@ class SettingsWindow(QWidget):
         super().__init__()
         self._settings = settings
         self.setWindowTitle("Deutsch Overlay · 设置")
-        self.resize(420, 440)
+        self.resize(460, 510)
         form = QFormLayout()
 
         self.device_combo = QComboBox()
@@ -63,9 +62,24 @@ class SettingsWindow(QWidget):
         self.language_combo.setCurrentIndex(self.language_combo.findData(settings.language_lock))
         form.addRow("声音语言", self.language_combo)
 
-        self.compare_box = QCheckBox("德语下面显示原文")
-        self.compare_box.setChecked(settings.compare_original)
-        form.addRow("原文对照", self.compare_box)
+        self.subtitle_combo = QComboBox()
+        self.subtitle_combo.addItem("仅德语", False)
+        self.subtitle_combo.addItem("德语 + 原文（中文语音时显示中德双语）", True)
+        self.subtitle_combo.setCurrentIndex(self.subtitle_combo.findData(settings.compare_original))
+        form.addRow("字幕内容", self.subtitle_combo)
+        self.position_combo = QComboBox()
+        for label, code in (
+            ("左上", "top-left"), ("上方居中", "top-center"), ("右上", "top-right"),
+            ("左侧居中", "middle-left"), ("屏幕中央", "middle-center"), ("右侧居中", "middle-right"),
+            ("左下", "bottom-left"), ("下方居中", "bottom-center"), ("右下", "bottom-right"),
+            ("自定义拖动", "custom"),
+        ):
+            self.position_combo.addItem(label, code)
+        self.position_combo.setCurrentIndex(self.position_combo.findData(settings.overlay_position))
+        form.addRow("字幕位置", self.position_combo)
+        self.speed_hint = QLabel("在线模式锁定声音语言时，可更早显示临时译文；自动识别多语言通常要等整句。")
+        self.speed_hint.setWordWrap(True)
+        form.addRow("速度提示", self.speed_hint)
         self.width_spin = QSpinBox()
         self.width_spin.setRange(240, 3840)
         self.width_spin.setValue(settings.overlay_width)
@@ -126,7 +140,10 @@ class SettingsWindow(QWidget):
             output_device_id=self.device_combo.currentData(),
             mode=self.mode_combo.currentData(),
             language_lock=self.language_combo.currentData(),
-            compare_original=self.compare_box.isChecked(),
+            compare_original=self.subtitle_combo.currentData(),
+            overlay_position=self.position_combo.currentData(),
+            overlay_x=self._settings.overlay_x if self.position_combo.currentData() == "custom" else None,
+            overlay_y=self._settings.overlay_y if self.position_combo.currentData() == "custom" else None,
             overlay_width=self.width_spin.value(),
             font_size=self.font_spin.value(),
             opacity=self.opacity_spin.value(),
@@ -150,7 +167,8 @@ class SettingsWindow(QWidget):
         self.device_combo.setCurrentIndex(max(0, self.device_combo.findData(settings.output_device_id)))
         self.mode_combo.setCurrentIndex(self.mode_combo.findData(settings.mode))
         self.language_combo.setCurrentIndex(self.language_combo.findData(settings.language_lock))
-        self.compare_box.setChecked(settings.compare_original)
+        self.subtitle_combo.setCurrentIndex(self.subtitle_combo.findData(settings.compare_original))
+        self.position_combo.setCurrentIndex(self.position_combo.findData(settings.overlay_position))
         self.width_spin.setValue(settings.overlay_width)
         self.font_spin.setValue(settings.font_size)
         self.opacity_spin.setValue(settings.opacity)
