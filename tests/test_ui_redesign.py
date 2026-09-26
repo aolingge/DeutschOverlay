@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from deutsch_overlay.config import Settings
@@ -112,3 +113,23 @@ def test_narrow_overlay_controls_fit_inside_caption_width(qapp):
         assert overlay.compare_button.text() == "双语"
     finally:
         overlay.close()
+
+
+def test_learning_history_uses_readable_light_surface(qapp):
+    original_palette = qapp.palette()
+    dark = QPalette(original_palette)
+    dark.setColor(QPalette.ColorRole.Window, QColor("#202020"))
+    dark.setColor(QPalette.ColorRole.Base, QColor("#2B2B2B"))
+    dark.setColor(QPalette.ColorRole.WindowText, QColor("#FFFFFF"))
+    qapp.setPalette(dark)
+    window = SettingsWindow(Settings(), [])
+    try:
+        dialog = window.history_dialog
+        dialog.show()
+        qapp.processEvents()
+        assert "QDialog#historyDialog" in dialog.styleSheet()
+        assert dialog.grab().toImage().pixelColor(5, 5).lightness() > 220
+        assert dialog.text.palette().base().color().lightness() > 220
+    finally:
+        window.close()
+        qapp.setPalette(original_palette)

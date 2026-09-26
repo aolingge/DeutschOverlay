@@ -39,3 +39,14 @@ QScrollBar:vertical { background: transparent; width: 9px; margin: 0; }
 QScrollBar::handle:vertical { background: #CDD5E0; border-radius: 4px; min-height: 30px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
+
+HISTORY_STYLE = """
+QDialog#historyDialog { background: #F6F7FB; color: #172033; font-family: 'Segoe UI Variable', 'Segoe UI'; font-size: 13px; }
+QLabel#historyTitle { color: #152033; font-size: 22px; font-weight: 700; }
+QLabel#historyDescription { color: #657287; font-size: 12px; }
+QPlainTextEdit { background: #FFFFFF; color: #172033; border: 1px solid #DFE5ED; border-radius: 12px; padding: 12px; selection-background-color: #CEE2FF; }
+QPushButton { background: #FFFFFF; color: #26364C; border: 1px solid #DDE3EB; border-radius: 8px; min-height: 36px; padding: 0 14px; font-weight: 600; }
+QPushButton:hover { background: #F4F7FC; border-color: #B7C5D8; }
+QPushButton#primaryButton { background: #2878E4; color: #FFFFFF; border-color: #2878E4; }
+QPushButton#primaryButton:hover { background: #1766D3; }
+"""

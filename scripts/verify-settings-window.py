@@ -29,6 +29,13 @@ def main() -> int:
         if not window.grab().save(str(output)):
             raise RuntimeError(f"Could not save {output}")
         print(output.resolve())
+    window.history_dialog.set_history("Guten Morgen!\n早上好！\n\nIch lerne Deutsch.\n我在学习德语。")
+    window.history_dialog.show()
+    application.processEvents()
+    output = args.output / "learning-history.png"
+    if not window.history_dialog.grab().save(str(output)):
+        raise RuntimeError(f"Could not save {output}")
+    print(output.resolve())
     window.close()
     return 0
 
