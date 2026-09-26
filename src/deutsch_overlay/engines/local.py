@@ -53,21 +53,21 @@ class LocalEngine:
         self.prefer_gpu = prefer_gpu
         self.warning: str | None = None
         self._warmed = False
+        self._using_gpu = False
 
     def prepare(self) -> None:
         """Load models before capture so the first spoken sentence is not queued cold."""
-        asr = self._get_asr()
+        self._get_asr()
         self._get_translator("en")
         self._get_translator("zh")
         if not self._warmed:
-            segments, _ = asr.transcribe(
+            self._transcribe(
                 np.zeros(16000, dtype=np.float32),
                 language="de",
                 vad_filter=False,
                 beam_size=1,
                 condition_on_previous_text=False,
             )
-            list(segments)
             self._warmed = True
 
     def _get_asr(self):
@@ -77,11 +77,27 @@ class LocalEngine:
                 try:
                     prepare_cuda_dlls()
                     self.asr = self.asr_factory(path, device="cuda", compute_type="int8_float16")
+                    self._using_gpu = True
                 except (RuntimeError, OSError, ValueError) as exc:
                     self.warning = f"GPU 识别不可用，已切换 CPU（{type(exc).__name__}）"
             if self.asr is None:
                 self.asr = self.asr_factory(path, device="cpu", compute_type="int8")
         return self.asr
+
+    def _transcribe(self, audio: np.ndarray, **options):
+        """Decode eagerly so GPU errors raised by lazy segments can use CPU once."""
+        try:
+            segments, info = self._get_asr().transcribe(audio, **options)
+            return list(segments), info
+        except (RuntimeError, OSError, ValueError) as exc:
+            if not self._using_gpu:
+                raise
+            self._using_gpu = False
+            self.prefer_gpu = False
+            self.asr = None
+            self.warning = f"GPU 识别运行失败，已切换 CPU（{type(exc).__name__}）"
+            segments, info = self._get_asr().transcribe(audio, **options)
+            return list(segments), info
 
     def _get_translator(self, language: str):
         if language not in self.translators:
@@ -100,7 +116,7 @@ class LocalEngine:
         if sample_rate != 16000 or audio.ndim != 1:
             raise ValueError("local engine needs 16 kHz mono audio")
         locked = language_lock if language_lock in {"de", "en", "zh"} else None
-        segments, info = self._get_asr().transcribe(
+        segments, info = self._transcribe(
             np.asarray(audio, dtype=np.float32),
             language=locked,
             vad_filter=True,

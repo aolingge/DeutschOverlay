@@ -133,3 +133,54 @@ def test_learning_history_uses_readable_light_surface(qapp):
     finally:
         window.close()
         qapp.setPalette(original_palette)
+
+
+def test_empty_learning_history_cannot_erase_clipboard(qapp):
+    window = SettingsWindow(Settings(), [])
+    try:
+        qapp.clipboard().setText("keep this")
+        assert not window.history_dialog.copy_button.isEnabled()
+        window.history_dialog.set_history("1. Guten Tag")
+        assert window.history_dialog.copy_button.isEnabled()
+        window.history_dialog.set_history("")
+        assert not window.history_dialog.copy_button.isEnabled()
+        assert qapp.clipboard().text() == "keep this"
+    finally:
+        window.close()
+
+
+def test_learning_history_fits_available_screen(qapp):
+    window = SettingsWindow(Settings(), [])
+    try:
+        available = qapp.primaryScreen().availableGeometry()
+        dialog = window.history_dialog
+        assert dialog.geometry().left() >= available.left()
+        assert dialog.geometry().top() >= available.top()
+        assert dialog.geometry().right() <= available.right()
+        assert dialog.geometry().bottom() <= available.bottom()
+    finally:
+        window.close()
+
+
+def test_settings_fields_have_accessible_labels(qapp):
+    window = SettingsWindow(Settings(), [])
+    try:
+        for field in (window.region_input, window.key_input, window.width_spin,
+                      window.background_button, window.device_combo, window.language_combo):
+            assert field.accessibleName()
+        assert "密钥" in window.key_input.accessibleName()
+        assert "背景" in window.background_button.accessibleName()
+        assert window.region_label.buddy() is window.region_input
+        assert window.key_label.buddy() is window.key_input
+    finally:
+        window.close()
+
+
+def test_status_renders_device_name_as_plain_text(qapp):
+    window = SettingsWindow(Settings(), [])
+    try:
+        window.set_status("正在监听：<b>Speakers</b>")
+        assert window.status_label.textFormat() == Qt.TextFormat.PlainText
+        assert "<b>Speakers</b>" in window.status_label.text()
+    finally:
+        window.close()

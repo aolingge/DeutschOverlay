@@ -101,6 +101,69 @@ def test_gpu_initialization_falls_back_to_cpu_with_warning(tmp_path):
     assert "CPU" in engine.warning
 
 
+def test_gpu_warmup_decode_failure_falls_back_to_cpu(tmp_path):
+    class Store:
+        def require(self, name):
+            return tmp_path / name
+
+    calls = []
+
+    class DeferredAsr:
+        def __init__(self, device):
+            self.device = device
+
+        def transcribe(self, _audio, **_kwargs):
+            def segments():
+                if self.device == "cuda":
+                    raise RuntimeError("CUDA execution failed")
+                yield FakeSegment("")
+
+            return segments(), FakeInfo("de")
+
+    def factory(_path, *, device, compute_type):
+        calls.append((device, compute_type))
+        return DeferredAsr(device)
+
+    engine = LocalEngine(
+        model_store=Store(), asr_factory=factory,
+        translators={"en": FakeTranslator(""), "zh": FakeTranslator("")},
+    )
+    engine.prepare()
+    assert [device for device, _compute in calls] == ["cuda", "cpu"]
+    assert engine._warmed
+    assert "CPU" in engine.warning
+
+
+def test_gpu_live_decode_failure_retries_once_on_cpu(tmp_path):
+    class Store:
+        def require(self, name):
+            return tmp_path / name
+
+    calls = []
+
+    class DeferredAsr:
+        def __init__(self, device):
+            self.device = device
+
+        def transcribe(self, _audio, **_kwargs):
+            def segments():
+                if self.device == "cuda":
+                    raise RuntimeError("CUDA execution failed")
+                yield FakeSegment("Hallo")
+
+            return segments(), FakeInfo("de")
+
+    def factory(_path, *, device, compute_type):
+        calls.append(device)
+        return DeferredAsr(device)
+
+    engine = LocalEngine(model_store=Store(), asr_factory=factory)
+    result = engine.process(np.ones(16000, dtype=np.float32), 16000, 1, "a", None)
+    assert result.original == "Hallo"
+    assert calls == ["cuda", "cpu"]
+    assert "CPU" in engine.warning
+
+
 def test_rejects_wrong_audio_format():
     with pytest.raises(ValueError, match="16 kHz mono"):
         LocalEngine(asr=FakeAsr("de", "Hallo")).process(

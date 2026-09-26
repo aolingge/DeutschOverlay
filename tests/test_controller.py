@@ -602,6 +602,87 @@ def test_online_idle_disconnects_then_new_sound_starts_fresh_session(qapp):
         controller.stop()
 
 
+def test_online_idle_delivers_final_caption_from_graceful_finish(qapp):
+    class FinalOnFinish:
+        def start(self, session, _language, on_caption, _on_error):
+            self.session = session
+            self.on_caption = on_caption
+
+        def push_frame(self, _frame):
+            pass
+
+        def finish(self):
+            self.on_caption(CaptionEvent(
+                self.session, "last", "de", "Guten Tag", None, True, time.monotonic(),
+            ))
+
+        def stop(self):
+            pass
+
+    loud = np.full(1600, 0.1, dtype=np.float32)
+    silence = np.zeros(1600, dtype=np.float32)
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource(
+            [loud, *([silence] * CaptionController.ONLINE_IDLE_FRAMES)]
+        ),
+        online_factory=lambda _limit: FinalOnFinish(),
+    )
+    views = []
+    controller.view_changed.connect(views.append)
+    try:
+        assert controller.start(replace(Settings(), mode="online"))
+        for _ in range(50):
+            QTest.qWait(20)
+            if not controller.running and views:
+                break
+        assert [view.primary for view in views] == ["Guten Tag"]
+    finally:
+        controller.stop()
+
+
+def test_online_reconnect_can_reuse_engine_segment_id(qapp):
+    class ReusedSegmentOnline:
+        def start(self, session, _language, on_caption, _on_error):
+            self.session = session
+            self.on_caption = on_caption
+            self.sent_partial = False
+
+        def push_frame(self, frame):
+            if not self.sent_partial and np.max(frame) > 0:
+                self.sent_partial = True
+                self.on_caption(CaptionEvent(
+                    self.session, "shared", "de", "Guten", None, False, time.monotonic(),
+                ))
+
+        def finish(self):
+            self.on_caption(CaptionEvent(
+                self.session, "shared", "de", "Guten Tag", None, True, time.monotonic(),
+            ))
+
+        def stop(self):
+            pass
+
+    loud = np.full(1600, 0.1, dtype=np.float32)
+    silence = np.zeros(1600, dtype=np.float32)
+    frames = [loud, *([silence] * CaptionController.ONLINE_IDLE_FRAMES)] * 2
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource(frames),
+        online_factory=lambda _limit: ReusedSegmentOnline(),
+    )
+    views = []
+    controller.view_changed.connect(views.append)
+    try:
+        assert controller.start(replace(Settings(), mode="online"))
+        for _ in range(150):
+            QTest.qWait(20)
+            if not controller.running and len(views) >= 4:
+                break
+        assert [view.final for view in views] == [False, True, False, True]
+        assert views[0].segment_id != views[2].segment_id
+    finally:
+        controller.stop()
+
+
 def test_online_stop_during_cloud_connection_never_uploads_audio(qapp, monkeypatch):
     entered = threading.Event()
     release = threading.Event()

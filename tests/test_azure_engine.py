@@ -1,6 +1,7 @@
 from datetime import date
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
+import time
 
 import numpy as np
 import pytest
@@ -294,6 +295,62 @@ def test_online_stop_closes_stream_and_recognizer_once(tmp_path):
     engine.stop()
     engine.stop()
     assert calls == ["stop", "close"]
+
+
+def test_idle_finish_accepts_final_result_delivered_during_sdk_stop(tmp_path):
+    class Store:
+        def get(self):
+            return AzureCredentials("eastasia", "a" * 32)
+
+    class LateRecognizer(FakeRecognizer):
+        def stop_continuous_recognition_async(self):
+            recognizer = self
+
+            class FinalFuture:
+                def get(self):
+                    recognizer.recognized.emit(SimpleNamespace(
+                        reason="translated", text="Guten Tag", translations={"de": ""},
+                    ))
+
+            return FinalFuture()
+
+    sdk = fake_sdk()
+    sdk.translation.TranslationRecognizer = LateRecognizer
+    captions = []
+    engine = AzureEngine(Store(), OnlineBudget(tmp_path / "usage.json", 1), sdk=sdk)
+    engine.start(1, "de", captions.append, lambda _error: None)
+    engine.finish()
+    assert [caption.original for caption in captions] == ["Guten Tag"]
+
+
+def test_idle_finish_waits_for_result_after_stop_future_completes(tmp_path):
+    class Store:
+        def get(self):
+            return AzureCredentials("eastasia", "a" * 32)
+
+    class LateRecognizer(FakeRecognizer):
+        def __init__(self, **options):
+            super().__init__(**options)
+            self.session_stopped = FakeSignal()
+
+        def stop_continuous_recognition_async(self):
+            def report_late_result():
+                time.sleep(0.05)
+                self.recognized.emit(SimpleNamespace(
+                    reason="translated", text="Guten Tag", translations={"de": ""},
+                ))
+                self.session_stopped.emit(SimpleNamespace())
+
+            Thread(target=report_late_result, daemon=True).start()
+            return FakeFuture()
+
+    sdk = fake_sdk()
+    sdk.translation.TranslationRecognizer = LateRecognizer
+    captions = []
+    engine = AzureEngine(Store(), OnlineBudget(tmp_path / "usage.json", 1), sdk=sdk)
+    engine.start(1, "de", captions.append, lambda _error: None)
+    engine.finish()
+    assert [caption.original for caption in captions] == ["Guten Tag"]
 
 
 def test_online_stop_persists_subsecond_usage_even_if_sdk_close_fails(tmp_path):

@@ -269,7 +269,10 @@ class DesktopApp:
         except (ValueError, OSError, RuntimeError):
             self.window.set_status("在线凭据未保存；请检查区域、密钥和 Windows 凭据存储")
             return
-        self.window.set_status("在线凭据已存入 Windows；选择在线模式后才会发送音频")
+        if self.settings.mode == "online":
+            self.window.set_status("在线凭据已保存；若在线识别已停止，请点击“应用设置”重新开始（可能产生费用）")
+        else:
+            self.window.set_status("在线凭据已存入 Windows；选择在线模式后才会发送音频")
 
     def toggle_compare(self) -> None:
         self.apply_settings(replace(self.settings, compare_original=not self.settings.compare_original))
@@ -339,8 +342,9 @@ class DesktopApp:
         self.window.set_status("播放设备列表已刷新；选择后点击应用设置")
 
     def reset_position(self) -> None:
-        self.apply_settings(replace(self.settings, overlay_x=None, overlay_y=None, overlay_position="bottom-center"))
-        self.window.set_status("字幕位置已恢复到屏幕下方")
+        if self.apply_settings(replace(self.settings, overlay_x=None, overlay_y=None,
+                                       overlay_position="bottom-center")):
+            self.window.set_status("字幕位置已恢复到屏幕下方")
 
     def preview_caption(self) -> None:
         self.overlay.show_caption(CaptionView(

@@ -111,7 +111,8 @@ def test_playing_video_reaches_visible_overlay(tmp_path, prepared_engine, langua
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             wait_for_ui(application, 0.1)
-            if any("Deutsch" in view.primary and (language != "zh" or view.secondary) for view in views):
+            if any(view.final and "Deutsch" in view.primary
+                   and (language != "zh" or view.secondary) for view in views):
                 break
         assert player.wait(timeout=10) == 0
         assert any("Deutsch" in view.primary for view in views), {

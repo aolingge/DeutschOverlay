@@ -61,6 +61,9 @@ class CaptionReducer:
     def apply(self, event: CaptionEvent) -> CaptionView | None:
         if event.session_id != self.session_id or event == self._last_event:
             return None
+        if (self._last_event is not None and self._last_event.final
+                and event.segment_id == self._last_event.segment_id and not event.final):
+            return None
         if self._last_event is not None and event.timestamp < self._last_event.timestamp:
             return None
         view = self._render(event)

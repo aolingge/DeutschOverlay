@@ -49,6 +49,15 @@ def test_same_segment_updates_one_caption_and_ignores_repeated_event():
     assert final.final is True
 
 
+def test_late_partial_cannot_replace_final_for_same_segment():
+    reducer = CaptionReducer(session_id=1)
+    assert reducer.apply(event(original="Guten Tag", final=True)).final
+    late = CaptionEvent(1, "a", "de", "Guten", None, False, 2.0)
+    assert reducer.apply(late) is None
+    assert reducer.current.primary == "Guten Tag"
+    assert reducer.current.final
+
+
 def test_stale_session_is_rejected_after_reset():
     reducer = CaptionReducer(session_id=1)
     reducer.apply(event())

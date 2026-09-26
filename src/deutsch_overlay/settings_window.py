@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QColorDialog,
@@ -174,6 +174,7 @@ class SettingsWindow(QWidget):
         footer_layout.setSpacing(9)
         self.status_label = QLabel("准备就绪")
         self.status_label.setObjectName("statusLabel")
+        self.status_label.setTextFormat(Qt.TextFormat.PlainText)
         self.status_label.setWordWrap(True)
         footer_layout.addWidget(self.status_label, 1)
         self.apply_button = QPushButton("应用设置")
@@ -225,10 +226,20 @@ class SettingsWindow(QWidget):
         label.setObjectName("fieldLabel")
         return label
 
+    @classmethod
+    def _add_labeled_row(cls, form: QFormLayout, text: str, control: QWidget) -> QLabel:
+        label = cls._field_label(text)
+        label.setBuddy(control)
+        if not control.accessibleName():
+            control.setAccessibleName(text)
+        form.addRow(label, control)
+        return label
+
     def _build_subtitles_page(self) -> QWidget:
         body, page = self._page_body()
         card, group = self._card("字幕内容", "德语始终显示在第一行；打开原文对照后，中文视频可同时看中德两行。")
         self.subtitle_combo = ChoiceGroup(columns=2)
+        self.subtitle_combo.setAccessibleName("字幕内容")
         self.subtitle_combo.addItem("仅德语", False)
         self.subtitle_combo.addItem("德语 + 原文", True)
         self.subtitle_combo.setCurrentIndex(self.subtitle_combo.findData(self._settings.compare_original))
@@ -245,6 +256,7 @@ class SettingsWindow(QWidget):
 
         card, group = self._card("声音来源", "选择正在播放游戏或视频声音的设备。")
         self.device_combo = QComboBox()
+        self.device_combo.setAccessibleName("播放设备")
         self._set_devices(self._devices, self._settings.output_device_id)
         refresh_button = QPushButton("刷新设备")
         refresh_button.clicked.connect(self.refresh_devices_requested.emit)
@@ -256,16 +268,20 @@ class SettingsWindow(QWidget):
         self.audio_level_label.setObjectName("hint")
         self.audio_level_label.setWordWrap(True)
         group.addWidget(self.audio_level_label)
-        group.addWidget(self._field_label("声音语言"))
+        language_label = self._field_label("声音语言")
         self.language_combo = ChoiceGroup(columns=4)
+        self.language_combo.setAccessibleName("声音语言")
         for label, code in (("自动识别", "auto"), ("德语", "de"), ("英语", "en"), ("中文", "zh")):
             self.language_combo.addItem(label, code)
         self.language_combo.setCurrentIndex(self.language_combo.findData(self._settings.language_lock))
+        language_label.setBuddy(self.language_combo.button_for_data("auto"))
+        group.addWidget(language_label)
         group.addWidget(self.language_combo)
         page.addWidget(card)
 
         card, group = self._card("字幕位置", "选一个大致位置，或解锁字幕条直接拖动。")
         self.position_combo = ChoiceGroup(columns=3)
+        self.position_combo.setAccessibleName("字幕位置")
         for label, code in (
             ("左上", "top-left"), ("上方", "top-center"), ("右上", "top-right"),
             ("左侧", "middle-left"), ("中央", "middle-center"), ("右侧", "middle-right"),
@@ -296,6 +312,7 @@ class SettingsWindow(QWidget):
         body, page = self._page_body()
         card, group = self._card("字幕风格", "先选一个样式，再按需要微调颜色和尺寸。")
         self.style_combo = ChoiceGroup(columns=3)
+        self.style_combo.setAccessibleName("字幕风格")
         for label, code in (("深色", "dark"), ("浅色", "light"),
                             ("透明文字", "clear"), ("描边", "outlined"), ("自定义", "custom")):
             self.style_combo.addItem(label, code)
@@ -309,23 +326,23 @@ class SettingsWindow(QWidget):
         self.width_spin.setRange(240, 3840)
         self.width_spin.setSuffix(" px")
         self.width_spin.setValue(self._settings.overlay_width)
-        form.addRow(self._field_label("字幕宽度"), self.width_spin)
+        self._add_labeled_row(form, "字幕宽度", self.width_spin)
         self.font_spin = QSpinBox()
         self.font_spin.setRange(12, 72)
         self.font_spin.setSuffix(" pt")
         self.font_spin.setValue(self._settings.font_size)
-        form.addRow(self._field_label("德语字号"), self.font_spin)
+        self._add_labeled_row(form, "德语字号", self.font_spin)
         self.fade_spin = QDoubleSpinBox()
         self.fade_spin.setRange(0, 30)
         self.fade_spin.setSuffix(" 秒")
         self.fade_spin.setValue(self._settings.fade_seconds)
-        form.addRow(self._field_label("无语音后隐藏"), self.fade_spin)
+        self._add_labeled_row(form, "无语音后隐藏", self.fade_spin)
         self.opacity_spin = QDoubleSpinBox()
         self.opacity_spin.setRange(0, 1.0)
         self.opacity_spin.setSingleStep(0.05)
         self.opacity_spin.setDecimals(2)
         self.opacity_spin.setValue(self._settings.opacity)
-        form.addRow(self._field_label("背景不透明度"), self.opacity_spin)
+        self._add_labeled_row(form, "背景不透明度", self.opacity_spin)
         group.addLayout(form)
         page.addWidget(card)
 
@@ -338,23 +355,23 @@ class SettingsWindow(QWidget):
         self.border_button = self._color_button(self._settings.border_color, "边框")
         for label, button in (("背景颜色", self.background_button), ("德语文字", self.primary_button),
                               ("原文颜色", self.secondary_button), ("边框颜色", self.border_button)):
-            form.addRow(self._field_label(label), button)
+            self._add_labeled_row(form, label, button)
         self.border_spin = QSpinBox()
         self.border_spin.setRange(0, 8)
         self.border_spin.setValue(self._settings.border_width)
-        form.addRow(self._field_label("边框宽度"), self.border_spin)
+        self._add_labeled_row(form, "边框宽度", self.border_spin)
         self.radius_spin = QSpinBox()
         self.radius_spin.setRange(0, 32)
         self.radius_spin.setValue(self._settings.corner_radius)
-        form.addRow(self._field_label("圆角半径"), self.radius_spin)
+        self._add_labeled_row(form, "圆角半径", self.radius_spin)
         self.padding_x_spin = QSpinBox()
         self.padding_x_spin.setRange(0, 40)
         self.padding_x_spin.setValue(self._settings.padding_horizontal)
-        form.addRow(self._field_label("左右留白"), self.padding_x_spin)
+        self._add_labeled_row(form, "左右留白", self.padding_x_spin)
         self.padding_y_spin = QSpinBox()
         self.padding_y_spin.setRange(0, 24)
         self.padding_y_spin.setValue(self._settings.padding_vertical)
-        form.addRow(self._field_label("上下留白"), self.padding_y_spin)
+        self._add_labeled_row(form, "上下留白", self.padding_y_spin)
         group.addLayout(form)
         page.addWidget(card)
         page.addStretch(1)
@@ -369,6 +386,7 @@ class SettingsWindow(QWidget):
         body, page = self._page_body()
         card, group = self._card("处理方式", "本地模式无需上传电脑声音。在线模式须本次运行手动开启，可能产生费用。")
         self.mode_combo = ChoiceGroup(columns=2)
+        self.mode_combo.setAccessibleName("处理方式")
         self.mode_combo.addItem("本地 · 默认", "local")
         self.mode_combo.addItem("在线 · Azure", "online")
         self.mode_combo.setCurrentIndex(self.mode_combo.findData(self._settings.mode))
@@ -381,6 +399,7 @@ class SettingsWindow(QWidget):
 
         card, group = self._card("每日在线用量", "此上限只约束本应用发送的音频分钟数；请同时在 Azure 设置账单预算。")
         self.online_limit_spin = QSpinBox()
+        self.online_limit_spin.setAccessibleName("每日在线用量")
         self.online_limit_spin.setRange(1, 1440)
         self.online_limit_spin.setSuffix(" 分钟")
         self.online_limit_spin.setValue(self._settings.online_minutes_limit)
@@ -392,11 +411,11 @@ class SettingsWindow(QWidget):
         form.setSpacing(11)
         self.region_input = QLineEdit()
         self.region_input.setPlaceholderText("例如 eastasia")
-        form.addRow(self._field_label("区域"), self.region_input)
+        self.region_label = self._add_labeled_row(form, "Azure 区域", self.region_input)
         self.key_input = QLineEdit()
         self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.key_input.setPlaceholderText("粘贴 Azure Speech 密钥")
-        form.addRow(self._field_label("密钥"), self.key_input)
+        self.key_label = self._add_labeled_row(form, "Azure 密钥", self.key_input)
         group.addLayout(form)
         save_key_button = QPushButton("保存在线凭据")
         save_key_button.clicked.connect(self._submit_credentials)
@@ -433,12 +452,16 @@ class SettingsWindow(QWidget):
     def _set_button_color(button: QPushButton, color: str) -> None:
         button.setProperty("color", color)
         button.setText(color)
+        name = button.property("color_name")
+        if name:
+            button.setAccessibleName(f"{name}颜色：{color}")
         value = QColor(color)
         foreground = "#111111" if value.lightness() > 150 else "#FFFFFF"
         button.setStyleSheet(f"background-color: {color}; color: {foreground}; border-radius: 8px;")
 
     def _color_button(self, color: str, name: str) -> QPushButton:
         button = QPushButton()
+        button.setProperty("color_name", name)
         self._set_button_color(button, color)
         button.clicked.connect(lambda: self._pick_color(button, name))
         return button

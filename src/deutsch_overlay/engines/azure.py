@@ -146,6 +146,8 @@ class AzureEngine:
         self._sequence = 0
         self._partial_segment_id: str | None = None
         self._interrupted = Event()
+        self._session_stopped = Event()
+        self._stopping = False
 
     def preflight(self) -> None:
         """Check local online prerequisites without opening a cloud session."""
@@ -156,6 +158,8 @@ class AzureEngine:
 
     def start(self, session_id: int, language_lock: str | None, on_caption, on_error) -> None:
         self._interrupted.clear()
+        self._session_stopped.clear()
+        self._stopping = False
         credentials = self.credential_store.get()
         if credentials is None:
             raise OnlineUnavailable("Azure credentials are not configured")
@@ -198,6 +202,9 @@ class AzureEngine:
         if self._language_lock:
             self._recognizer.recognizing.connect(self._recognizing)
         self._recognizer.canceled.connect(self._canceled)
+        session_stopped = getattr(self._recognizer, "session_stopped", None)
+        if session_stopped is not None:
+            session_stopped.connect(lambda _event: self._session_stopped.set())
         try:
             wait_for_sdk_future(self._recognizer.start_continuous_recognition_async(), 10)
         except Exception as exc:
@@ -259,27 +266,49 @@ class AzureEngine:
             self._on_caption(caption)
 
     def _canceled(self, _event) -> None:
-        if self._active and not self._interrupted.is_set():
+        if self._active and not self._interrupted.is_set() and not self._stopping:
             self._interrupted.set()
             if self._on_error is not None:
                 self._on_error("在线识别已中断，请检查网络或 Azure 服务状态")
 
     def stop(self) -> None:
-        self._active = False
-        self._interrupted.set()
-        self._partial_segment_id = None
+        self._stop(drain=False)
+
+    def finish(self) -> None:
+        """End an idle stream while accepting its last recognized result."""
+        self._stop(drain=True)
+
+    def _stop(self, *, drain: bool) -> None:
+        drain = drain and self._active and not self._interrupted.is_set()
+        self._stopping = drain
+        if not drain:
+            self._active = False
+            self._interrupted.set()
+            self._partial_segment_id = None
         recognizer, stream = self._recognizer, self._stream
         self._recognizer = None
         self._stream = None
-        if recognizer is not None:
-            try:
-                wait_for_sdk_future(recognizer.stop_continuous_recognition_async(), 2)
-            except Exception:
-                pass
         try:
-            if stream is not None and hasattr(stream, "close"):
-                stream.close()
-        except Exception:
-            pass
+            if drain and stream is not None and hasattr(stream, "close"):
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            if recognizer is not None:
+                try:
+                    wait_for_sdk_future(recognizer.stop_continuous_recognition_async(), 2)
+                    if drain and hasattr(recognizer, "session_stopped"):
+                        self._session_stopped.wait(1)
+                except Exception:
+                    pass
+            if not drain and stream is not None and hasattr(stream, "close"):
+                try:
+                    stream.close()
+                except Exception:
+                    pass
         finally:
+            self._active = False
+            self._interrupted.set()
+            self._partial_segment_id = None
+            self._stopping = False
             self.budget.close()

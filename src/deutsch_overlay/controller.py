@@ -280,12 +280,15 @@ class CaptionController(QObject):
         engine = None
         level_meter = AudioLevelMeter()
         device_epoch = 0
+        stream_number = 0
         streaming = False
         quiet_frames = 0
         capture_thread = None
 
-        def on_caption_for(epoch: int):
-            return lambda event: self._caption_from_worker.emit(replace(event, device_epoch=epoch))
+        def on_caption_for(epoch: int, stream: int):
+            return lambda event: self._caption_from_worker.emit(replace(
+                event, segment_id=f"{stream}:{event.segment_id}", device_epoch=epoch,
+            ))
 
         def new_engine():
             candidate = self.online_factory(settings.online_minutes_limit)
@@ -370,10 +373,11 @@ class CaptionController(QObject):
                 if audible and not streaming:
                     if engine is None:
                         engine = new_engine()
+                    stream_number += 1
                     engine.start(
                         session_id,
                         language,
-                        on_caption_for(device_epoch),
+                        on_caption_for(device_epoch, stream_number),
                         lambda message: self._status_from_worker.emit(session_id, message),
                     )
                     if stop.is_set():
@@ -384,12 +388,14 @@ class CaptionController(QObject):
                     engine.push_frame(frame)
                     quiet_frames = 0 if audible else quiet_frames + 1
                     if quiet_frames >= self.ONLINE_IDLE_FRAMES:
-                        engine.stop()
+                        finish = getattr(engine, "finish", None)
+                        if finish is not None:
+                            finish()
+                        else:
+                            engine.stop()
                         engine = None
                         streaming = False
                         quiet_frames = 0
-                        device_epoch += 1
-                        self._device_epoch = device_epoch
                         self._status_from_worker.emit(session_id, "在线识别待机：播放声已停止，暂停发送音频")
             if capture_errors and not stop.is_set():
                 self._status_from_worker.emit(session_id, f"电脑声音采集失败：{capture_errors[0]}")

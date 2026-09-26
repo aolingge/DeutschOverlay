@@ -134,6 +134,20 @@ def test_cloud_credentials_are_saved_only_by_explicit_form_action(qapp, tmp_path
     runtime.shutdown()
 
 
+def test_saving_credentials_after_failed_online_start_explains_manual_retry(qapp, tmp_path):
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.apply_settings(replace(runtime.settings, mode="online"))
+        runtime.save_credentials("eastasia", "a" * 32)
+        assert "应用设置" in runtime.window.status_label.text()
+        assert "可能产生费用" in runtime.window.status_label.text()
+    finally:
+        runtime.shutdown()
+
+
 def test_audio_input_state_is_visible_in_settings(qapp, tmp_path):
     controller = FakeController()
     runtime = DesktopApp(
@@ -223,6 +237,24 @@ def test_device_refresh_and_reset_position(qapp, tmp_path, monkeypatch):
     assert runtime.settings.overlay_x is None and runtime.settings.overlay_y is None
     assert runtime.settings.overlay_position == "bottom-center"
     runtime.shutdown()
+
+
+def test_reset_position_does_not_claim_success_when_save_fails(qapp, tmp_path, monkeypatch):
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        assert runtime.apply_settings(replace(runtime.settings, overlay_x=25, overlay_y=35,
+                                              overlay_position="custom"))
+        monkeypatch.setattr("deutsch_overlay.app.save_settings",
+                            lambda *_args: (_ for _ in ()).throw(OSError("disk full")))
+        runtime.reset_position()
+        assert runtime.settings.overlay_position == "custom"
+        assert load_settings(runtime.settings_path).overlay_position == "custom"
+        assert "保存失败" in runtime.window.status_label.text()
+    finally:
+        runtime.shutdown()
 
 
 def test_missing_saved_output_stays_selected_until_user_changes_it(qapp, tmp_path):
