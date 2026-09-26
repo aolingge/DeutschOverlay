@@ -4,7 +4,7 @@ Windows 11 上的德语实时字幕条。它识别电脑正在播放的声音：
 
 ## 使用
 
-1. 打开 `DeutschOverlay.exe`。程序会显示设置窗口，并留在系统托盘。
+1. 通过桌面或开始菜单的“Deutsch Overlay”快捷方式打开；便携包用户可直接打开完整文件夹内的 `DeutschOverlay.exe`。程序会显示设置窗口，并留在系统托盘。
 2. 选择播放设备。若不确定，保留“系统默认播放设备”；运行中切换系统默认扬声器或耳机时，应用会自动跟随。切换瞬间尚未说完的一句可能丢失，已显示的上一句仍按原时限淡出。手动指定设备则保持原选择；断开时会显示“暂不可用”并等待重连，不会暗中改回默认设备。设备列表有变化时可点“刷新”。
 3. 启动游戏或视频。语音出现时，字幕条会在所选位置显示；安静一段时间后自动隐去。
 4. 在“字幕内容”中选择“仅德语”或“德语 + 原文”。播放中文视频时，后者显示德语译文和中文原文；播放德语内容时只显示一遍德语。
@@ -22,9 +22,13 @@ Windows 11 上的德语实时字幕条。它识别电脑正在播放的声音：
 
 完整文件夹约 3 GB，包含本地模型和 NVIDIA GPU 运行库。只复制 EXE 无法运行识别。在 PowerShell 中可运行 `Start-Process .\DeutschOverlay.exe -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden`；退出码为 0 表示本地模型和语音检测器可加载。
 
+本机安装脚本 `scripts/install-local.ps1` 会把**已构建的完整文件夹**复制到用户目录 `%LOCALAPPDATA%\Programs\DeutschOverlay` 的独立版本目录，逐文件校验 SHA-256 并用安装目录中的模型自检，再更新桌面及开始菜单快捷方式。回采自检在没有可用播放设备时只给警告，不妨碍安装；打开应用后仍需选择并检查播放设备。此安装路径独立于源码仓库的 `dist`，之后重新构建仓库不会打断已安装版本。重复运行会校验并复用相同的完整包；中断的复制会继续完成并重验。更新时会保留旧版本，避免删除正在使用的文件；旧版本需要在确认不再使用后由用户自行清理。
+
 若需要排查冻结版是否能打开播放设备，可设置环境变量 `DEUTSCH_OVERLAY_SELF_TEST_REPORT` 为一个本机文本文件路径，再用同样方式传入 `--audio-self-test`。退出码为 0 表示已取得环回音频帧；未播放声音时峰值为 0 是正常的。该检查不会识别、上传或保存语音。
 
 在线模式是可选项，需要你自行在 Microsoft Azure 创建 Speech 资源，在设置窗口填入区域和密钥并点击“保存在线凭据”，然后手动切换到“在线”。密钥存入 Windows 凭据存储，不写入设置文件。启用在线模式后，电脑播放声会发送给 Azure，可能产生费用。应用内的每日分钟上限只限制应用发送的音频量，不能代替 Azure 账单预算。建议同时在 Azure 设置预算提醒。
+
+在线模式先检查本地凭据和每日额度，然后等待播放设备出现可检测的声音再建立云连接；持续安静约 5 秒会停流，下一段有声内容会重新连接。背景音乐和音效也算播放声，可能消耗在线额度；设备音量极低、初次连接较慢或网络异常时，仍可能漏掉句首或停止会话。用户可切回本地模式，或在 Azure 控制台查看服务侧实际用量。
 
 旧版曾把 Azure 区域和密钥作为两项 Windows 凭据保存。新版会优先读取成组保存的凭据，但不会自动删除旧条目；若要移除旧密钥，请在 Windows“凭据管理器”中检查 `DeutschOverlay.AzureSpeech` 下的 `region` 和 `key` 项，确认不再需要后自行删除。应用不会在升级时读取、打印或上传旧密钥用于清理。
 
@@ -51,7 +55,7 @@ $env:DEUTSCH_OVERLAY_MODELS = (Join-Path (Get-Location) 'models')
 .\.venv\Scripts\python.exe -m deutsch_overlay.app
 ```
 
-模型转换需要 PyTorch；开发者可创建带系统站点包的 `.model-venv` 并安装 `ctranslate2`、`transformers`、`sentencepiece`、`huggingface-hub`、`requests`，再运行 `scripts/prepare-models.ps1`。模型大文件从上游按区间续传，并与上游 SHA-256 对照。Windows EXE 的构建命令是 `scripts/build-exe.ps1`，输出在 `dist/DeutschOverlay/`。
+模型转换需要 PyTorch；开发者可创建带系统站点包的 `.model-venv` 并安装 `ctranslate2`、`transformers`、`sentencepiece`、`huggingface-hub`、`requests`，再运行 `scripts/prepare-models.ps1`。模型大文件从上游按区间续传，并与上游 SHA-256 对照。Windows EXE 的构建命令是 `scripts/build-exe.ps1`，输出在 `dist/DeutschOverlay/`；构建后可运行 `scripts/install-local.ps1` 更新本机安装。
 
 ## 验证
 

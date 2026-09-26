@@ -147,6 +147,13 @@ class AzureEngine:
         self._partial_segment_id: str | None = None
         self._interrupted = Event()
 
+    def preflight(self) -> None:
+        """Check local online prerequisites without opening a cloud session."""
+        if self.credential_store.get() is None:
+            raise OnlineUnavailable("Azure credentials are not configured")
+        if self.budget.remaining_seconds <= 0:
+            raise OnlineLimitReached("daily online audio limit reached")
+
     def start(self, session_id: int, language_lock: str | None, on_caption, on_error) -> None:
         self._interrupted.clear()
         credentials = self.credential_store.get()
@@ -269,6 +276,10 @@ class AzureEngine:
                 wait_for_sdk_future(recognizer.stop_continuous_recognition_async(), 2)
             except Exception:
                 pass
-        if stream is not None and hasattr(stream, "close"):
-            stream.close()
-        self.budget.close()
+        try:
+            if stream is not None and hasattr(stream, "close"):
+                stream.close()
+        except Exception:
+            pass
+        finally:
+            self.budget.close()

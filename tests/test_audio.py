@@ -502,6 +502,34 @@ def test_segmenter_bounds_long_speech():
     assert len(outputs[0]) <= 16000 // 2
 
 
+def test_segmenter_preserves_context_across_forced_long_speech_cut():
+    segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600, max_seconds=7)
+    clips = []
+    for index in range(80):
+        frame = np.full(1600, 0.1 + index / 1000, dtype=np.float32)
+        clips.extend(segmenter.push(frame))
+    remainder = segmenter.flush()
+    if remainder is not None:
+        clips.append(remainder)
+    assert len(clips) == 2
+    assert len(clips[0]) == 7 * 16000
+    assert len(clips[1]) <= 7 * 16000
+    assert np.array_equal(clips[0][-4 * 1600:], clips[1][:4 * 1600])
+
+
+def test_forced_cut_does_not_emit_overlap_for_one_new_voice_frame():
+    segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600, max_seconds=7,
+                                silence_seconds=0.3)
+    voice = np.full(1600, 0.15, dtype=np.float32)
+    silence = np.zeros(1600, dtype=np.float32)
+    clips = [clip for _ in range(70) for clip in segmenter.push(voice)]
+    assert len(clips) == 1
+    assert segmenter.push(voice) == []
+    for _ in range(3):
+        clips.extend(segmenter.push(silence))
+    assert len(clips) == 1
+
+
 def test_segmenter_snapshot_keeps_current_speech_for_final_caption():
     segmenter = SpeechSegmenter(sample_rate=16000, frame_samples=1600, max_seconds=5)
     voice = np.full(1600, 0.15, dtype=np.float32)

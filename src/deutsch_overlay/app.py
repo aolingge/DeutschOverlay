@@ -129,7 +129,7 @@ class DesktopApp:
 
     def _build_tray(self) -> None:
         menu = QMenu(self.window)
-        menu.addAction("打开设置", self.window.show)
+        menu.addAction("打开设置", self.show_settings)
         menu.addAction("显示/隐藏字幕", self.toggle_visibility)
         menu.addAction("切换原文对照", self.toggle_compare)
         menu.addAction("切换语言", self.cycle_language)
@@ -139,7 +139,7 @@ class DesktopApp:
         menu.addAction("退出", self.shutdown)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(
-            lambda reason: self.window.show()
+            lambda reason: self.show_settings()
             if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None
         )
 
@@ -195,7 +195,7 @@ class DesktopApp:
                  self._last_view.timestamp, self._last_view.final)):
             self._last_view_received_at = time.monotonic()
         self._last_view = view
-        if self._visible and not self._paused:
+        if self._visible and not self._paused and self._locked:
             self._restore_recent_caption()
 
     def _restore_recent_caption(self) -> bool:
@@ -290,7 +290,10 @@ class DesktopApp:
             self.window.set_status("字幕位置已解锁；显示字幕后可拖动")
 
     def _show_position_hint(self) -> None:
-        self.overlay.show_caption(CaptionView(0, "position", "拖动字幕条调整位置", None, False, 0))
+        self.overlay.show_caption(
+            CaptionView(0, "position", "拖动字幕条调整位置", None, False, 0),
+            persistent=True,
+        )
 
     def _save_position(self, x: int, y: int) -> None:
         self.apply_settings(replace(self.settings, overlay_x=x, overlay_y=y, overlay_position="custom"))
@@ -313,7 +316,7 @@ class DesktopApp:
             0, "preview", "Guten Tag! Ich lerne Deutsch.",
             "你好，我在学习德语。" if self.settings.compare_original else None,
             True, 0.0,
-        ))
+        ), persistent=not self._locked)
 
     def apply_and_preview(self, updated: Settings) -> None:
         if self.apply_settings(updated):
@@ -382,8 +385,11 @@ def main() -> None:
     runtime = None
     guard = SingleInstance("DeutschOverlay.settings", lambda: runtime.show_settings())
     if not guard.listen():
-        if not guard.notify_existing():
-            QMessageBox.warning(None, "Deutsch Overlay", "程序已经在运行，但暂时无法打开现有设置窗口。")
+        if guard.already_running:
+            if not guard.notify_existing():
+                QMessageBox.warning(None, "Deutsch Overlay", "程序已经在运行，但暂时无法打开现有设置窗口。")
+        else:
+            QMessageBox.warning(None, "Deutsch Overlay", f"启动失败：{guard.error_message}")
         return
     try:
         runtime = DesktopApp(application)

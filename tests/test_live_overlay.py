@@ -12,13 +12,14 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
-from deutsch_overlay.config import Settings
+from deutsch_overlay.app import DesktopApp
+from deutsch_overlay.config import Settings, save_settings
 from deutsch_overlay.audio import LoopbackSource
 from deutsch_overlay.controller import CaptionController
 from deutsch_overlay.engines.local import LocalEngine
-from deutsch_overlay.overlay import CaptionOverlay
 
 from test_real_models import synthesize_wav
 
@@ -73,14 +74,31 @@ def test_playing_video_reaches_visible_overlay(tmp_path, prepared_engine, langua
 
     source = CountingSource(retry_forever=True)
     controller = CaptionController(source_factory=lambda _device: source, local_factory=lambda: prepared_engine)
-    overlay = CaptionOverlay(settings)
+
+    class SilentHotkeys(QObject):
+        action = Signal(str)
+        failed = Signal(str)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    settings_path = tmp_path / "settings.json"
+    save_settings(settings_path, settings)
+    runtime = DesktopApp(
+        application, settings_path=settings_path, controller=controller,
+        hotkeys=SilentHotkeys(), devices=[],
+    )
+    overlay = runtime.overlay
     statuses, views, levels = [], [], []
     controller.status_changed.connect(statuses.append)
     controller.level_changed.connect(levels.append)
-    controller.view_changed.connect(lambda view: (views.append(view), overlay.show_caption(view)))
+    controller.view_changed.connect(views.append)
     player = None
     try:
-        assert controller.start(settings)
+        runtime.start()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and not any("正在连接电脑播放设备" in value for value in statuses):
             wait_for_ui(application, 0.1)
@@ -115,5 +133,4 @@ def test_playing_video_reaches_visible_overlay(tmp_path, prepared_engine, langua
         if player is not None and player.poll() is None:
             player.terminate()
             player.wait(timeout=5)
-        controller.stop()
-        overlay.close()
+        runtime.shutdown()

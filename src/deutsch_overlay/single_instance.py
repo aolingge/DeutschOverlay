@@ -23,18 +23,25 @@ class SingleInstance:
         self.on_second_launch = on_second_launch
         self.server = QLocalServer()
         self._mutex = None
+        self.already_running = False
+        self.error_message = ""
         self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
         self.server.newConnection.connect(self._on_connection)
 
     def listen(self) -> bool:
+        self.already_running = False
+        self.error_message = ""
         mutex = _kernel32.CreateMutexW(None, False, f"Local\\{self.name}")
         if not mutex:
+            self.error_message = f"无法创建单实例锁（Windows 错误 {ctypes.get_last_error()}）"
             return False
         if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+            self.already_running = True
             _kernel32.CloseHandle(mutex)
             return False
         self._mutex = mutex
         if not self.server.listen(self.name):
+            self.error_message = f"无法启动本地通信：{self.server.errorString()}"
             self.close()
             return False
         return True

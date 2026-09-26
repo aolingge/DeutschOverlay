@@ -157,6 +157,9 @@ def test_online_start_without_credentials_never_creates_sdk(tmp_path):
 
     engine = AzureEngine(NoCredentials(), OnlineBudget(tmp_path / "usage.json", 1))
     with pytest.raises(OnlineUnavailable, match="credentials"):
+        engine.preflight()
+    assert engine.sdk is None and engine._stream is None
+    with pytest.raises(OnlineUnavailable, match="credentials"):
         engine.start(1, None, lambda _event: None, lambda _error: None)
 
 
@@ -291,6 +294,20 @@ def test_online_stop_closes_stream_and_recognizer_once(tmp_path):
     engine.stop()
     engine.stop()
     assert calls == ["stop", "close"]
+
+
+def test_online_stop_persists_subsecond_usage_even_if_sdk_close_fails(tmp_path):
+    class Store:
+        def get(self):
+            return AzureCredentials("eastasia", "a" * 32)
+
+    path = tmp_path / "usage.json"
+    engine = AzureEngine(Store(), OnlineBudget(path, 1), sdk=fake_sdk())
+    engine.start(1, "de", lambda _event: None, lambda _error: None)
+    engine.push_frame(np.ones(1600, dtype=np.float32) * 0.2)
+    engine._stream.close = lambda: (_ for _ in ()).throw(OSError("SDK close failed"))
+    engine.stop()
+    assert OnlineBudget(path, 1).remaining_seconds == pytest.approx(59.9)
 
 
 def test_online_language_lock_skips_auto_detection(tmp_path):

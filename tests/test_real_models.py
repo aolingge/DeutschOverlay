@@ -88,6 +88,29 @@ def test_real_sapi_speech_produces_german_caption(local_engine, tmp_path: Path, 
     assert view.secondary == (caption.original if language != "de" else None)
 
 
+def test_quiet_sapi_speech_still_reaches_local_caption(local_engine, tmp_path: Path):
+    wav_path = tmp_path / "quiet.wav"
+    synthesize_wav(wav_path, "de-DE", "Guten Morgen. Ich lerne heute Deutsch.")
+    with wave.open(str(wav_path), "rb") as audio_file:
+        speech = np.frombuffer(audio_file.readframes(audio_file.getnframes()), dtype="<i2")
+    quiet = speech.astype(np.float32) / 32768 * 0.003
+    assert float(np.max(np.abs(quiet))) < 0.003
+    detector = SileroSpeechDetector()
+    segmenter = SpeechSegmenter(
+        sample_rate=16000, frame_samples=1600, silence_seconds=0.3,
+        voice_detector=detector,
+    )
+    padded = np.pad(quiet, (0, (-len(quiet)) % 1600 + 8000))
+    clips = [clip for index in range(0, len(padded), 1600)
+             for clip in segmenter.push(padded[index:index + 1600])]
+    final = segmenter.flush()
+    if final is not None:
+        clips.append(final)
+    assert clips, "Quiet but intelligible speech should not be discarded before ASR"
+    captions = [local_engine.process(clip, 16000, 1, str(index), "de") for index, clip in enumerate(clips)]
+    assert any(caption and "Deutsch" in caption.original for caption in captions)
+
+
 @pytest.mark.skipif(
     os.environ.get("DEUTSCH_TEST_LIVE_LOOPBACK") != "1",
     reason="set DEUTSCH_TEST_LIVE_LOOPBACK=1 to audibly test the default playback device",

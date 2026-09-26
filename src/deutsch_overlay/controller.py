@@ -8,6 +8,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 
 from deutsch_overlay.audio import AudioLevelMeter, LoopbackSource, SileroSpeechDetector, SpeechSegmenter
@@ -33,7 +34,10 @@ def _online_engine(limit_minutes: int) -> AzureEngine:
 
 class CaptionController(QObject):
     STOP_JOIN_SECONDS = 1.0
+    CAPTURE_JOIN_SECONDS = 0.25
     LOCAL_PREVIEW_FRAMES = 20
+    ONLINE_ACTIVITY_RMS = 0.0001
+    ONLINE_IDLE_FRAMES = 50  # Five seconds of 100 ms frames.
     view_changed = Signal(object)
     status_changed = Signal(str)
     level_changed = Signal(object)
@@ -276,29 +280,70 @@ class CaptionController(QObject):
         engine = None
         level_meter = AudioLevelMeter()
         device_epoch = 0
+        streaming = False
+        quiet_frames = 0
+        capture_thread = None
 
         def on_caption_for(epoch: int):
             return lambda event: self._caption_from_worker.emit(replace(event, device_epoch=epoch))
 
+        def new_engine():
+            candidate = self.online_factory(settings.online_minutes_limit)
+            preflight = getattr(candidate, "preflight", None)
+            if preflight is not None:
+                preflight()
+            return candidate
+
         try:
-            engine = self.online_factory(settings.online_minutes_limit)
+            engine = new_engine()
             language = settings.language_lock if settings.language_lock != "auto" else None
-            engine.start(
-                session_id,
-                language,
-                on_caption_for(device_epoch),
-                lambda message: self._status_from_worker.emit(session_id, message),
-            )
-            self._status_from_worker.emit(session_id, "正在连接电脑播放设备（在线模式，可能产生费用）")
+            self._status_from_worker.emit(session_id, "正在等待电脑播放设备（在线模式，尚未发送音频）")
             listening = False
             active_id = None
             active_generation = None
             source = self._source_for_session(settings.output_device_id, session_id)
-            for frame in source.frames(stop):
+            packets: queue.Queue[tuple[object, object, object]] = queue.Queue(maxsize=120)
+            capture_done = threading.Event()
+            capture_errors: list[Exception] = []
+
+            def capture() -> None:
+                reported_overflow = False
+                try:
+                    for captured in source.frames(stop):
+                        if stop.is_set():
+                            break
+                        packet = (
+                            captured.copy(),
+                            getattr(source, "active_device", None),
+                            getattr(source, "capture_generation", None),
+                        )
+                        try:
+                            packets.put_nowait(packet)
+                        except queue.Full:
+                            try:
+                                packets.get_nowait()
+                            except queue.Empty:
+                                pass
+                            packets.put_nowait(packet)
+                            if not reported_overflow:
+                                self._status_from_worker.emit(session_id, "在线连接较慢，已跳过最早的一段声音")
+                                reported_overflow = True
+                except Exception as exc:
+                    capture_errors.append(exc)
+                finally:
+                    capture_done.set()
+
+            capture_thread = threading.Thread(target=capture, name=f"online-capture-{session_id}", daemon=True)
+            capture_thread.start()
+            while not stop.is_set():
+                try:
+                    frame, active, generation = packets.get(timeout=0.1)
+                except queue.Empty:
+                    if capture_done.is_set():
+                        break
+                    continue
                 if stop.is_set():
                     break
-                active = getattr(source, "active_device", None)
-                generation = getattr(source, "capture_generation", None)
                 changed = listening and (
                     (active is not None and active.id != active_id)
                     or (generation is not None and generation != active_generation)
@@ -306,30 +351,58 @@ class CaptionController(QObject):
                 if changed:
                     device_epoch += 1
                     self._device_epoch = device_epoch
-                    engine.stop()
-                    engine = self.online_factory(settings.online_minutes_limit)
-                    engine.start(
-                        session_id,
-                        language,
-                        on_caption_for(device_epoch),
-                        lambda message: self._status_from_worker.emit(session_id, message),
-                    )
+                    if engine is not None:
+                        engine.stop()
+                    engine = None
+                    streaming = False
+                    quiet_frames = 0
                     level_meter = AudioLevelMeter()
                 if not listening or changed:
                     name = f"：{active.name}" if active is not None else "电脑播放声"
-                    self._status_from_worker.emit(session_id, f"正在监听{name}（在线模式，可能产生费用）")
+                    self._status_from_worker.emit(session_id, f"正在监听{name}（在线待机，等待播放声音）")
                     active_id = active.id if active is not None else None
                     active_generation = generation
                     listening = True
                 level = level_meter.push(frame)
                 if level is not None:
                     self._level_from_worker.emit(session_id, level)
-                engine.push_frame(frame)
+                audible = float(np.sqrt(np.mean(np.square(frame, dtype=np.float32)))) >= self.ONLINE_ACTIVITY_RMS
+                if audible and not streaming:
+                    if engine is None:
+                        engine = new_engine()
+                    engine.start(
+                        session_id,
+                        language,
+                        on_caption_for(device_epoch),
+                        lambda message: self._status_from_worker.emit(session_id, message),
+                    )
+                    if stop.is_set():
+                        break
+                    streaming = True
+                    self._status_from_worker.emit(session_id, "正在在线识别电脑播放声（可能产生费用）")
+                if streaming:
+                    engine.push_frame(frame)
+                    quiet_frames = 0 if audible else quiet_frames + 1
+                    if quiet_frames >= self.ONLINE_IDLE_FRAMES:
+                        engine.stop()
+                        engine = None
+                        streaming = False
+                        quiet_frames = 0
+                        device_epoch += 1
+                        self._device_epoch = device_epoch
+                        self._status_from_worker.emit(session_id, "在线识别待机：播放声已停止，暂停发送音频")
+            if capture_errors and not stop.is_set():
+                self._status_from_worker.emit(session_id, f"电脑声音采集失败：{capture_errors[0]}")
         except (OnlineUnavailable, OnlineLimitReached) as exc:
             self._status_from_worker.emit(session_id, f"在线识别停止：{exc}")
         except Exception:
             self._status_from_worker.emit(session_id, "在线识别停止：请检查网络或服务状态")
         finally:
+            stop.set()
             self._level_from_worker.emit(session_id, None)
-            if engine is not None:
-                engine.stop()
+            try:
+                if engine is not None:
+                    engine.stop()
+            finally:
+                if capture_thread is not None:
+                    capture_thread.join(timeout=self.CAPTURE_JOIN_SECONDS)

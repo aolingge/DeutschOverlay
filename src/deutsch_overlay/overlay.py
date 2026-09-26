@@ -201,7 +201,9 @@ class CaptionOverlay(QWidget):
         y = max(rect.top(), min(y, rect.bottom() - self.height() + 1))
         self.move(x, y)
 
-    def show_caption(self, view: CaptionView, *, timeout_seconds: float | None = None) -> None:
+    def show_caption(
+        self, view: CaptionView, *, timeout_seconds: float | None = None, persistent: bool = False,
+    ) -> None:
         self._primary_text = view.primary
         self._secondary_text = view.secondary or ""
         opacity = 1.0 if view.final else 0.78
@@ -211,6 +213,8 @@ class CaptionOverlay(QWidget):
         self.show()
         self.raise_()
         self._hide_timer.stop()
+        if persistent:
+            return
         timeout = (self._settings.fade_seconds if view.final else max(2.0, self._settings.fade_seconds))
         if timeout_seconds is not None:
             timeout = timeout_seconds

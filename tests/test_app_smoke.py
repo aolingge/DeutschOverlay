@@ -139,6 +139,8 @@ def test_audio_input_state_is_visible_in_settings(qapp, tmp_path):
     try:
         controller.level_changed.emit(0.0)
         assert "未检测到" in runtime.window.audio_level_label.text()
+        controller.level_changed.emit(0.001)
+        assert "正在接收" in runtime.window.audio_level_label.text()
         controller.level_changed.emit(0.1)
         assert "正在接收" in runtime.window.audio_level_label.text()
         controller.level_changed.emit(None)
@@ -328,6 +330,66 @@ def test_locking_position_restores_recent_caption(qapp, tmp_path):
         runtime.toggle_lock()
         assert runtime.overlay.isVisible()
         assert runtime.overlay.primary_label.text() == "Guten Tag"
+    finally:
+        runtime.shutdown()
+
+
+def test_unlocked_position_hint_stays_visible_until_locked(qapp, tmp_path):
+    from PySide6.QtTest import QTest
+
+    path = tmp_path / "settings.json"
+    save_settings(path, Settings(fade_seconds=0.02))
+    runtime = DesktopApp(
+        qapp, settings_path=path, controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.toggle_lock()
+        QTest.qWait(80)
+        assert runtime.overlay.isVisible()
+        assert "拖动字幕条" in runtime.overlay.primary_label.text()
+        runtime.controller.view_changed.emit(CaptionView(1, "spoken", "Guten Tag", None, True, 1.0))
+        qapp.processEvents()
+        assert "拖动字幕条" in runtime.overlay.primary_label.text()
+        runtime.toggle_lock()
+        assert runtime.overlay.primary_label.text() == "Guten Tag"
+        QTest.qWait(80)
+        assert not runtime.overlay.isVisible()
+    finally:
+        runtime.shutdown()
+
+
+def test_tray_open_settings_restores_minimized_window(qapp, tmp_path):
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.window.showMinimized()
+        qapp.processEvents()
+        assert runtime.window.isMinimized()
+        runtime.tray.contextMenu().actions()[0].trigger()
+        qapp.processEvents()
+        assert runtime.window.isVisible() and not runtime.window.isMinimized()
+    finally:
+        runtime.shutdown()
+
+
+def test_unlocked_preview_remains_draggable_after_caption_timeout(qapp, tmp_path):
+    from PySide6.QtTest import QTest
+
+    path = tmp_path / "settings.json"
+    save_settings(path, Settings(fade_seconds=0.02))
+    runtime = DesktopApp(
+        qapp, settings_path=path, controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.toggle_lock()
+        runtime.preview_caption()
+        QTest.qWait(80)
+        assert runtime.overlay.isVisible()
+        assert runtime.overlay.primary_label.text()
     finally:
         runtime.shutdown()
 

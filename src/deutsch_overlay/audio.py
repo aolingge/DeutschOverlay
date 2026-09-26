@@ -263,8 +263,11 @@ class SileroSpeechDetector:
     def __call__(self, frame: np.ndarray) -> bool:
         self._recent.append(frame)
         audio = np.concatenate(self._recent)
-        if float(np.max(np.abs(audio))) < 0.003:
+        peak = float(np.max(np.abs(audio)))
+        if peak < 0.0001:
             return False
+        if peak < 0.02:
+            audio = audio * min(20.0, 0.02 / peak)
         audio = np.pad(audio, (0, (-len(audio)) % 512)).astype(np.float32)
         scores = self.model(audio).reshape(-1)
         return bool(np.max(scores[-5:]) >= 0.35)
@@ -297,10 +300,13 @@ class SpeechSegmenter:
         self.min_voice_frames = ceil(min_speech_seconds * frames_per_second)
         self.quiet_frames_needed = ceil(silence_seconds * frames_per_second)
         self.max_frames = ceil(max_seconds * frames_per_second)
+        self.overlap_frames = min(ceil(0.4 * frames_per_second), self.max_frames // 4)
         self.voice_detector = voice_detector
         self._preroll: deque[np.ndarray] = deque(maxlen=2)
         self._frames: list[np.ndarray] = []
+        self._voice_flags: list[bool] = []
         self._voice_frames = 0
+        self._fresh_voice_frames = 0
         self._quiet_frames = 0
 
     @property
@@ -327,24 +333,39 @@ class SpeechSegmenter:
                 self._preroll.append(frame)
                 return []
             self._frames = [*self._preroll, frame]
+            self._voice_flags = [False] * len(self._preroll) + [True]
             self._preroll.clear()
             self._voice_frames = 1
+            self._fresh_voice_frames = 1
             return []
 
         self._frames.append(frame)
+        self._voice_flags.append(voiced)
         if voiced:
             self._voice_frames += 1
+            self._fresh_voice_frames += 1
             self._quiet_frames = 0
         else:
             self._quiet_frames += 1
         if len(self._frames) >= self.max_frames or self._quiet_frames >= self.quiet_frames_needed:
+            forced_cut = len(self._frames) >= self.max_frames and voiced
+            tail = self._frames[-self.overlap_frames:] if forced_cut and self.overlap_frames else []
+            tail_flags = self._voice_flags[-len(tail):] if tail else []
             clip = self.flush()
+            if clip is not None and tail:
+                self._frames = tail
+                self._voice_flags = tail_flags
+                self._voice_frames = sum(tail_flags)
             return [clip] if clip is not None else []
         return []
 
     def flush(self) -> np.ndarray | None:
-        clip = np.concatenate(self._frames) if self._voice_frames >= self.min_voice_frames else None
+        clip = (np.concatenate(self._frames)
+                if self._voice_frames >= self.min_voice_frames
+                and self._fresh_voice_frames >= self.min_voice_frames else None)
         self._frames = []
+        self._voice_flags = []
         self._voice_frames = 0
+        self._fresh_voice_frames = 0
         self._quiet_frames = 0
         return clip

@@ -26,3 +26,26 @@ def test_second_launch_notifies_first_instance():
     finally:
         first.close()
         second.close()
+
+
+def test_listen_failure_is_not_reported_as_existing_instance():
+    application = QApplication.instance() or QApplication([])
+    guard = SingleInstance(f"DeutschOverlay-test-{uuid.uuid4().hex}", lambda: None)
+
+    class FailedServer:
+        def listen(self, _name):
+            return False
+
+        def errorString(self):
+            return "local server unavailable"
+
+        def close(self):
+            pass
+
+    guard.server = FailedServer()
+    try:
+        assert not guard.listen()
+        assert not guard.already_running
+        assert "local server unavailable" in guard.error_message
+    finally:
+        guard.close()

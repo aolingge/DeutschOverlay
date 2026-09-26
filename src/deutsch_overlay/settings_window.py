@@ -295,7 +295,7 @@ class SettingsWindow(QWidget):
     def set_audio_level(self, level: float | None) -> None:
         if level is None:
             self.audio_level_label.setText("等待声音采集")
-        elif level < 0.003:
+        elif level < 0.0001:
             self.audio_level_label.setText("未检测到电脑播放声；请检查播放设备、Windows 音量混合器中的应用输出和系统音量")
         else:
             self.audio_level_label.setText("正在接收电脑播放声")

@@ -459,12 +459,15 @@ def test_comparison_toggle_uses_current_caption_without_new_recognition(qapp):
     controller.stop()
 
 
-def test_online_setup_failure_is_visible_and_capture_never_starts(qapp):
+def test_online_setup_failure_is_visible_before_capture_opens(qapp):
     calls = []
 
     class BrokenOnline:
-        def start(self, *_args):
+        def preflight(self):
             raise OnlineUnavailable("Azure credentials are not configured")
+
+        def start(self, *_args):
+            raise AssertionError("cloud connection should not start")
 
         def stop(self):
             pass
@@ -483,6 +486,249 @@ def test_online_setup_failure_is_visible_and_capture_never_starts(qapp):
     controller.stop()
     assert calls == []
     assert any("credentials" in status for status in statuses)
+
+
+def test_online_connection_waits_for_playback_device_first_frame(qapp):
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    class DelayedSource:
+        active_device = OutputDevice("one", "Speakers", True)
+        capture_generation = 1
+
+        def frames(self, stop):
+            entered.set()
+            release.wait(2)
+            if not stop.is_set():
+                yield np.full(1600, 0.1, dtype=np.float32)
+
+    class RecordingOnline:
+        def start(self, *_args):
+            calls.append("start")
+
+        def push_frame(self, _frame):
+            calls.append("frame")
+
+        def stop(self):
+            calls.append("stop")
+
+    controller = CaptionController(
+        source_factory=lambda _device: DelayedSource(),
+        online_factory=lambda _limit: RecordingOnline(),
+    )
+    try:
+        assert controller.start(replace(Settings(), mode="online"))
+        assert entered.wait(1)
+        QTest.qWait(50)
+        assert calls == []
+        release.set()
+        for _ in range(50):
+            QTest.qWait(20)
+            if "frame" in calls:
+                break
+        assert calls[:2] == ["start", "frame"]
+    finally:
+        release.set()
+        controller.stop()
+
+
+def test_online_silent_playback_does_not_open_or_bill_cloud_session(qapp):
+    starts = []
+
+    class RecordingOnline:
+        def start(self, *_args):
+            starts.append("start")
+
+        def push_frame(self, _frame):
+            raise AssertionError("silence must not be sent online")
+
+        def stop(self):
+            pass
+
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource([np.zeros(1600, dtype=np.float32)] * 10),
+        online_factory=lambda _limit: RecordingOnline(),
+    )
+    try:
+        assert controller.start(replace(Settings(), mode="online"))
+        for _ in range(50):
+            QTest.qWait(20)
+            if not controller.running:
+                break
+        assert starts == []
+    finally:
+        controller.stop()
+
+
+def test_online_idle_disconnects_then_new_sound_starts_fresh_session(qapp):
+    engines = []
+
+    class RecordingOnline:
+        def __init__(self):
+            self.frames = 0
+            self.starts = 0
+            self.stops = 0
+
+        def start(self, *_args):
+            self.starts += 1
+
+        def push_frame(self, _frame):
+            self.frames += 1
+
+        def stop(self):
+            self.stops += 1
+
+    def make_engine(_limit):
+        engine = RecordingOnline()
+        engines.append(engine)
+        return engine
+
+    loud = np.full(1600, 0.1, dtype=np.float32)
+    silence = np.zeros(1600, dtype=np.float32)
+    source = FiniteSource([loud, *([silence] * CaptionController.ONLINE_IDLE_FRAMES), loud])
+    controller = CaptionController(source_factory=lambda _device: source, online_factory=make_engine)
+    try:
+        assert controller.start(replace(Settings(), mode="online"))
+        for _ in range(50):
+            QTest.qWait(20)
+            if not controller.running:
+                break
+        assert len(engines) == 2
+        assert engines[0].starts == engines[1].starts == 1
+        assert engines[0].frames == 1 + CaptionController.ONLINE_IDLE_FRAMES
+        assert engines[1].frames == 1
+    finally:
+        controller.stop()
+
+
+def test_online_stop_during_cloud_connection_never_uploads_audio(qapp, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    frames = []
+
+    class BlockingOnline:
+        def start(self, *_args):
+            entered.set()
+            release.wait(2)
+
+        def push_frame(self, _frame):
+            frames.append("uploaded")
+
+        def stop(self):
+            pass
+
+    controller = CaptionController(
+        source_factory=lambda _device: FiniteSource([np.full(1600, 0.1, dtype=np.float32)]),
+        online_factory=lambda _limit: BlockingOnline(),
+    )
+    monkeypatch.setattr(controller, "STOP_JOIN_SECONDS", 0.01)
+    try:
+        assert controller.start(replace(Settings(), mode="online"))
+        assert entered.wait(1)
+        controller.stop()
+        release.set()
+        for _ in range(50):
+            QTest.qWait(20)
+            if not controller.running:
+                break
+        assert not controller.running
+        assert frames == []
+    finally:
+        release.set()
+        controller.stop()
+
+
+def test_online_capture_continues_while_cloud_connection_opens(qapp):
+    entered = threading.Event()
+    release = threading.Event()
+    captured = []
+    uploaded = []
+
+    class BurstSource:
+        active_device = OutputDevice("one", "Speakers", True)
+        capture_generation = 1
+
+        def frames(self, stop):
+            for index in range(30):
+                if stop.is_set():
+                    return
+                captured.append(index)
+                yield np.full(1600, 0.1, dtype=np.float32)
+                time.sleep(0.005)
+
+    class SlowOnline:
+        def start(self, *_args):
+            entered.set()
+            release.wait(2)
+
+        def push_frame(self, frame):
+            uploaded.append(float(frame[0]))
+
+        def stop(self):
+            pass
+
+    controller = CaptionController(
+        source_factory=lambda _device: BurstSource(),
+        online_factory=lambda _limit: SlowOnline(),
+    )
+    try:
+        assert controller.start(replace(Settings(), mode="online"))
+        assert entered.wait(1)
+        time.sleep(0.2)
+        assert len(captured) == 30
+        release.set()
+        for _ in range(100):
+            QTest.qWait(20)
+            if len(uploaded) == 30:
+                break
+        assert len(uploaded) == 30
+    finally:
+        release.set()
+        controller.stop()
+
+
+def test_online_stop_closes_cloud_when_capture_driver_blocks(qapp, monkeypatch):
+    capture_blocked = threading.Event()
+    release = threading.Event()
+    uploaded = threading.Event()
+    cloud_stopped = threading.Event()
+
+    class BlockingSource:
+        def frames(self, _stop):
+            yield np.full(1600, 0.1, dtype=np.float32)
+            capture_blocked.set()
+            release.wait(3)
+
+    class RecordingOnline:
+        def start(self, *_args):
+            pass
+
+        def push_frame(self, _frame):
+            uploaded.set()
+
+        def stop(self):
+            cloud_stopped.set()
+
+    controller = CaptionController(
+        source_factory=lambda _device: BlockingSource(),
+        online_factory=lambda _limit: RecordingOnline(),
+    )
+    monkeypatch.setattr(controller, "STOP_JOIN_SECONDS", 0.05)
+    try:
+        assert controller.start(replace(Settings(), mode="online"))
+        assert capture_blocked.wait(1)
+        assert uploaded.wait(1)
+        controller.stop()
+        assert cloud_stopped.wait(0.3)
+        for _ in range(25):
+            if not controller.running:
+                break
+            QTest.qWait(20)
+        assert not controller.running
+    finally:
+        release.set()
+        controller.stop()
 
 
 def test_stop_sets_no_active_worker(qapp):
