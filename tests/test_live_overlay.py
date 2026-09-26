@@ -122,9 +122,12 @@ def test_playing_video_reaches_visible_overlay(tmp_path, prepared_engine, langua
             "active_device": repr(source.active_device),
         }
         assert overlay.isVisible() and "Deutsch" in overlay.primary_label.text()
+        assert any("Deutsch" in entry.german for entry in runtime.history.entries)
+        assert "Deutsch" in runtime.window.history_dialog.text.toPlainText()
         if language == "zh":
             assert overlay.secondary_label.isVisible()
             assert any(char in overlay.secondary_label.text() for char in "你好学习學習")
+            assert any(char in runtime.history.entries[-1].original for char in "你好学习學習")
         else:
             assert overlay.secondary_label.isHidden()
         assert not overlay.grab().isNull()

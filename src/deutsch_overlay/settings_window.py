@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from deutsch_overlay.audio import OutputDevice
 from deutsch_overlay.config import Settings
+from deutsch_overlay.learning_history_dialog import LearningHistoryDialog
 
 
 STYLE_PRESETS = {
@@ -181,6 +182,9 @@ class SettingsWindow(QWidget):
         reset_position_button.clicked.connect(self.reset_position_requested.emit)
         models_button = QPushButton("模型说明")
         models_button.clicked.connect(self.models_help_requested.emit)
+        self.history_dialog = LearningHistoryDialog(self)
+        history_button = QPushButton("学习记录（本次运行）")
+        history_button.clicked.connect(self.history_dialog.show)
         buttons = QHBoxLayout()
         buttons.addWidget(apply_button)
         buttons.addWidget(preview_button)
@@ -195,6 +199,7 @@ class SettingsWindow(QWidget):
         layout.addWidget(unlock_button)
         layout.addWidget(reset_position_button)
         layout.addWidget(models_button)
+        layout.addWidget(history_button)
         layout.addLayout(buttons)
         layout.addWidget(self.status_label)
         layout.addWidget(QLabel("快捷键：Ctrl+Alt+1 原文；2 显隐；3 语言；4 暂停"))
@@ -341,6 +346,7 @@ class SettingsWindow(QWidget):
         self.device_combo.setCurrentIndex(max(0, index))
 
     def closeEvent(self, event) -> None:
+        self.history_dialog.hide()
         if self.close_exits:
             event.ignore()
             self.exit_requested.emit()

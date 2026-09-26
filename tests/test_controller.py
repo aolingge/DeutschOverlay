@@ -675,7 +675,9 @@ def test_online_capture_continues_while_cloud_connection_opens(qapp):
     try:
         assert controller.start(replace(Settings(), mode="online"))
         assert entered.wait(1)
-        time.sleep(0.2)
+        deadline = time.monotonic() + 1
+        while len(captured) < 30 and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert len(captured) == 30
         release.set()
         for _ in range(100):

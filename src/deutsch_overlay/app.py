@@ -18,6 +18,7 @@ from deutsch_overlay.config import ConfigError, Settings, load_settings, save_se
 from deutsch_overlay.controller import CaptionController
 from deutsch_overlay.credentials import AzureCredentialStore
 from deutsch_overlay.hotkeys import HotkeyService
+from deutsch_overlay.learning_history import CaptionHistory
 from deutsch_overlay.overlay import CaptionOverlay
 from deutsch_overlay.settings_window import SettingsWindow
 from deutsch_overlay.single_instance import SingleInstance
@@ -113,6 +114,7 @@ class DesktopApp:
         self.credential_store = credential_store or AzureCredentialStore()
         self.overlay = CaptionOverlay(self.settings)
         self.window = SettingsWindow(self.settings, devices)
+        self.history = CaptionHistory()
         self.window.set_status(startup_message)
         self._visible = True
         self._paused = False
@@ -121,6 +123,7 @@ class DesktopApp:
         self._locked = True
         self._last_view: CaptionView | None = None
         self._last_view_received_at: float | None = None
+        self._history_suppressed_view: tuple | None = None
         self._shutting_down = False
         self.tray = QSystemTrayIcon(_tray_icon(), self.window)
         self.tray.setToolTip("Deutsch Overlay")
@@ -155,6 +158,7 @@ class DesktopApp:
         self.window.reset_position_requested.connect(self.reset_position)
         self.window.preview_requested.connect(self.apply_and_preview)
         self.window.exit_requested.connect(self.shutdown)
+        self.window.history_dialog.clear_requested.connect(self.clear_history)
         self.overlay.moved.connect(self._save_position)
         self.hotkeys.action.connect(self._hotkey_action)
         self.hotkeys.failed.connect(self.window.set_status)
@@ -189,6 +193,12 @@ class DesktopApp:
         self._start_pipeline()
 
     def _show_view(self, view: CaptionView) -> None:
+        view_key = (view.session_id, view.segment_id, view.timestamp, view.final)
+        suppress_history = self._history_suppressed_view == view_key
+        if self._history_suppressed_view is not None and not suppress_history:
+            self._history_suppressed_view = None
+        if not suppress_history and self.history.add(view):
+            self.window.history_dialog.set_history(self.history.text())
         if (self._last_view is None or
                 (view.session_id, view.segment_id, view.timestamp, view.final) !=
                 (self._last_view.session_id, self._last_view.segment_id,
@@ -197,6 +207,17 @@ class DesktopApp:
         self._last_view = view
         if self._visible and not self._paused and self._locked:
             self._restore_recent_caption()
+
+    def clear_history(self) -> None:
+        if self._last_view is not None and self._last_view.final:
+            self._history_suppressed_view = (
+                self._last_view.session_id, self._last_view.segment_id,
+                self._last_view.timestamp, self._last_view.final,
+            )
+        else:
+            self._history_suppressed_view = None
+        self.history.clear()
+        self.window.history_dialog.set_history("")
 
     def _restore_recent_caption(self) -> bool:
         if self._last_view is None or self._last_view_received_at is None:

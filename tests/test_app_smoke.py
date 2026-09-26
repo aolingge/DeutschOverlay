@@ -149,6 +149,52 @@ def test_audio_input_state_is_visible_in_settings(qapp, tmp_path):
         runtime.shutdown()
 
 
+def test_learning_history_can_review_copy_and_clear_final_captions(qapp, tmp_path):
+    controller = FakeController()
+    path = tmp_path / "settings.json"
+    runtime = DesktopApp(
+        qapp, settings_path=path, controller=controller,
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        preview = CaptionView(1, "one", "Guten Tag", None, False, 1.0,
+                              source_original="你好")
+        controller.view_changed.emit(preview)
+        assert runtime.window.history_dialog.text.toPlainText() == ""
+        controller.view_changed.emit(replace(preview, final=True))
+        content = runtime.window.history_dialog.text.toPlainText()
+        assert "Guten Tag" in content and "你好" in content
+        assert not path.exists()
+        runtime.window.history_dialog.copy_button.click()
+        assert qapp.clipboard().text() == content
+        runtime.window.history_dialog.clear_button.click()
+        assert runtime.window.history_dialog.text.toPlainText() == ""
+        assert runtime.history.entries == ()
+        controller.view_changed.emit(replace(preview, final=True))
+        assert runtime.history.entries == ()
+        controller.view_changed.emit(CaptionView(1, "two", "Guten Abend", None, True, 2.0))
+        assert len(runtime.history.entries) == 1
+    finally:
+        runtime.shutdown()
+
+
+def test_closing_settings_also_hides_learning_history(qapp, tmp_path):
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.window.show()
+        runtime.window.history_dialog.show()
+        qapp.processEvents()
+        assert runtime.window.history_dialog.isVisible()
+        runtime.window.close()
+        qapp.processEvents()
+        assert not runtime.window.history_dialog.isVisible()
+    finally:
+        runtime.shutdown()
+
+
 def test_loaded_online_setting_is_local_for_new_session(qapp, tmp_path):
     path = tmp_path / "settings.json"
     save_settings(path, Settings(mode="online"))

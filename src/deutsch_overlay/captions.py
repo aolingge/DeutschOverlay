@@ -25,6 +25,8 @@ class CaptionView:
     secondary: str | None
     final: bool
     timestamp: float
+    source_original: str | None = None
+    full_primary: str | None = None
 
 
 def _two_lines(value: str) -> str:
@@ -84,4 +86,6 @@ class CaptionReducer:
             secondary=secondary,
             final=event.final,
             timestamp=event.timestamp,
+            source_original=event.original.strip() if event.language != "de" else None,
+            full_primary=(event.original if event.language == "de" else event.german or "").strip(),
         )

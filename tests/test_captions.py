@@ -18,8 +18,10 @@ def test_english_and_chinese_need_german_translation():
     english = reducer.apply(event("en", "Hello", "Hallo"))
     assert english.primary == "Hallo"
     assert english.secondary is None
+    assert english.source_original == "Hello"
     chinese = reducer.apply(event("zh", "你好", "Hallo", segment="b"))
     assert chinese.primary == "Hallo"
+    assert chinese.source_original == "你好"
 
 
 def test_comparison_toggles_without_new_engine_result():
@@ -60,6 +62,16 @@ def test_caption_text_is_limited_to_two_lines():
     reducer = CaptionReducer(session_id=1)
     view = reducer.apply(event(original="Eins\nZwei\nDrei"))
     assert view.primary == "Eins\nZwei…"
+
+
+def test_review_text_retains_full_translation_beyond_overlay_limit():
+    reducer = CaptionReducer(session_id=1, compare_original=False)
+    view = reducer.apply(event(
+        "zh", "第一行\n第二行\n第三行", "Erste Zeile\nZweite Zeile\nDritte Zeile",
+    ))
+    assert view.primary == "Erste Zeile\nZweite Zeile…"
+    assert view.full_primary == "Erste Zeile\nZweite Zeile\nDritte Zeile"
+    assert view.source_original == "第一行\n第二行\n第三行"
 
 
 def test_unsupported_language_does_not_show_wrong_caption():
