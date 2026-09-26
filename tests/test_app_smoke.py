@@ -31,6 +31,7 @@ class FakeController(QObject):
         self.started = []
         self.stopped = 0
         self.comparison = []
+        self.pauses = []
 
     def start(self, settings):
         self.started.append(settings)
@@ -40,6 +41,9 @@ class FakeController(QObject):
 
     def set_compare_original(self, enabled):
         self.comparison.append(enabled)
+
+    def pause(self, value):
+        self.pauses.append(value)
 
 
 class FakeHotkeys(QObject):
@@ -524,8 +528,40 @@ def test_every_background_preset_reaches_saved_settings(qapp):
     window.show()
     qapp.processEvents()
     assert window.settings_scroll.horizontalScrollBar().maximum() == 0
-    assert window.settings_scroll.verticalScrollBar().maximum() > 0
+    assert window.preview_button.isVisible()
     window.close()
+
+
+def test_quick_controls_and_overlay_toolbar_use_existing_app_actions(qapp, tmp_path):
+    runtime = DesktopApp(
+        qapp, settings_path=tmp_path / "settings.json", controller=FakeController(),
+        hotkeys=FakeHotkeys(), credential_store=FakeCredentials(), devices=[],
+    )
+    try:
+        runtime.window.visibility_button.click()
+        assert not runtime._visible
+        assert runtime.window.visibility_button.text() == "显示字幕"
+        runtime.window.visibility_button.click()
+        assert runtime._visible
+        runtime.window.pause_button.click()
+        assert runtime._paused
+        assert runtime.controller.pauses == [True]
+        assert runtime.window.pause_button.text() == "继续识别"
+        runtime.window.pause_button.click()
+        assert not runtime._paused
+        runtime.toggle_lock()
+        runtime.window.mode_combo.setCurrentIndex(runtime.window.mode_combo.findData("online"))
+        runtime.window.font_spin.setValue(35)
+        runtime.overlay.compare_button.click()
+        assert runtime.settings.compare_original
+        assert runtime.overlay.compare_button.text() == "仅德语"
+        assert runtime.window.mode_combo.currentData() == "online"
+        assert runtime.window.font_spin.value() == 35
+        assert "未应用" in runtime.window.status_label.text()
+        runtime.overlay.done_button.click()
+        assert runtime._locked
+    finally:
+        runtime.shutdown()
 
 
 def test_same_settings_retry_after_previous_worker_blocks_restart(qapp, tmp_path):

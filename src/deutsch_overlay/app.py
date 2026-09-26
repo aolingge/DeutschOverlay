@@ -129,6 +129,7 @@ class DesktopApp:
         self.tray.setToolTip("Deutsch Overlay")
         self._build_tray()
         self._connect_signals()
+        self.window.set_runtime_controls(visible=self._visible, paused=self._paused)
 
     def _build_tray(self) -> None:
         menu = QMenu(self.window)
@@ -153,6 +154,8 @@ class DesktopApp:
         self.window.settings_changed.connect(self.apply_settings)
         self.window.credentials_submitted.connect(self.save_credentials)
         self.window.unlock_requested.connect(self.toggle_lock)
+        self.window.visibility_requested.connect(self.toggle_visibility)
+        self.window.pause_requested.connect(self.toggle_pause)
         self.window.models_help_requested.connect(self._show_model_help)
         self.window.refresh_devices_requested.connect(self.refresh_devices)
         self.window.reset_position_requested.connect(self.reset_position)
@@ -160,6 +163,9 @@ class DesktopApp:
         self.window.exit_requested.connect(self.shutdown)
         self.window.history_dialog.clear_requested.connect(self.clear_history)
         self.overlay.moved.connect(self._save_position)
+        self.overlay.compare_requested.connect(self.toggle_compare)
+        self.overlay.settings_requested.connect(self.show_settings)
+        self.overlay.lock_requested.connect(self.toggle_lock)
         self.hotkeys.action.connect(self._hotkey_action)
         self.hotkeys.failed.connect(self.window.set_status)
 
@@ -252,7 +258,9 @@ class DesktopApp:
             self._last_view_received_at = None
             self._start_pipeline()
         elif not pipeline_changed and not self._restart_pending:
-            self.window.set_status("设置已保存")
+            self.window.set_status(
+                "快捷操作已保存；还有未应用的设置" if self.window.has_pending_changes() else "设置已保存"
+            )
         return True
 
     def save_credentials(self, region: str, key: str) -> None:
@@ -268,6 +276,7 @@ class DesktopApp:
 
     def toggle_visibility(self) -> None:
         self._visible = not self._visible
+        self.window.set_runtime_controls(visible=self._visible, paused=self._paused)
         if not self._visible:
             self.overlay.hide_caption()
             self.window.set_status("字幕已隐藏")
@@ -288,6 +297,7 @@ class DesktopApp:
 
     def toggle_pause(self) -> None:
         self._paused = not self._paused
+        self.window.set_runtime_controls(visible=self._visible, paused=self._paused)
         if self._paused:
             self.overlay.hide_caption()
             self._last_view = None

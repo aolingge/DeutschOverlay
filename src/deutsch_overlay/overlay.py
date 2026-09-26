@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QMouseEvent
-from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from deutsch_overlay.captions import CaptionView
 from deutsch_overlay.config import Settings
@@ -12,6 +12,9 @@ from deutsch_overlay.config import Settings
 
 class CaptionOverlay(QWidget):
     moved = Signal(int, int)
+    compare_requested = Signal()
+    settings_requested = Signal()
+    lock_requested = Signal()
 
     def __init__(self, settings: Settings) -> None:
         super().__init__()
@@ -48,7 +51,36 @@ class CaptionOverlay(QWidget):
         self.inner_layout.addWidget(self.secondary_label)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
         outer.addWidget(self.frame)
+
+        self.control_bar = QFrame(self)
+        self.control_bar.setObjectName("overlayControls")
+        self.control_bar.setFixedHeight(42)
+        self.control_bar.setStyleSheet(
+            "QFrame#overlayControls { background: #252D3B; border: 1px solid #56647A; border-radius: 11px; }"
+            "QLabel { color: #E7EDF6; border: none; background: transparent; font-size: 12px; }"
+            "QPushButton { background: #39475B; color: #FFFFFF; border: 1px solid #61738B;"
+            " border-radius: 7px; padding: 4px 10px; font-size: 12px; }"
+            "QPushButton:hover { background: #4D6180; }"
+        )
+        controls = QHBoxLayout(self.control_bar)
+        controls.setContentsMargins(12, 5, 7, 5)
+        controls.setSpacing(7)
+        self.control_hint = QLabel("拖动字幕条调整位置")
+        controls.addWidget(self.control_hint)
+        controls.addStretch(1)
+        self.compare_button = QPushButton("德语 + 原文" if not settings.compare_original else "仅德语")
+        self.compare_button.clicked.connect(self.compare_requested.emit)
+        controls.addWidget(self.compare_button)
+        self.settings_button = QPushButton("设置")
+        self.settings_button.clicked.connect(self.settings_requested.emit)
+        controls.addWidget(self.settings_button)
+        self.done_button = QPushButton("完成")
+        self.done_button.clicked.connect(self.lock_requested.emit)
+        controls.addWidget(self.done_button)
+        outer.addWidget(self.control_bar)
+        self.control_bar.hide()
 
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
@@ -72,6 +104,8 @@ class CaptionOverlay(QWidget):
     def set_locked(self, locked: bool) -> None:
         if self._locked != locked:
             self._locked = locked
+            self.control_bar.setVisible(not locked)
+            self._fit_text()
             self._apply_flags()
 
     def set_style(self, settings: Settings) -> None:
@@ -138,6 +172,7 @@ class CaptionOverlay(QWidget):
         rect = screen.availableGeometry() if screen is not None else None
         display_width = min(self._settings.overlay_width, rect.width()) if rect is not None else self._settings.overlay_width
         self.setFixedWidth(display_width)
+        self._sync_controls(display_width)
         max_height = min(rect.height(), max(120, round(rect.height() * 0.4))) if rect is not None else 10000
         margins = self.inner_layout.contentsMargins()
         frame_border = self.frame.frameWidth() * 2
@@ -145,7 +180,8 @@ class CaptionOverlay(QWidget):
         has_secondary = bool(self._secondary_text)
         self.secondary_label.setVisible(has_secondary)
         spacing = self.inner_layout.spacing() if has_secondary else 0
-        content_limit = max(1, max_height - margins.top() - margins.bottom() - spacing - frame_border)
+        controls_height = self.control_bar.height() + self.layout().spacing() if not self._locked else 0
+        content_limit = max(1, max_height - controls_height - margins.top() - margins.bottom() - spacing - frame_border)
 
         def measure(size: int) -> tuple[int, int]:
             self._set_font_size(size)
@@ -180,9 +216,17 @@ class CaptionOverlay(QWidget):
         if has_secondary:
             self.secondary_label.setFixedHeight(secondary_height)
         self.setFixedHeight(min(max_height, margins.top() + primary_height + spacing +
-                                secondary_height + margins.bottom() + frame_border))
+                                secondary_height + margins.bottom() + frame_border + controls_height))
         self.layout().activate()
         self._place_on_screen()
+
+    def _sync_controls(self, display_width: int) -> None:
+        compact = display_width < 430
+        self.control_hint.setVisible(not compact and not self._locked)
+        if compact:
+            self.compare_button.setText("单语" if self._settings.compare_original else "双语")
+        else:
+            self.compare_button.setText("仅德语" if self._settings.compare_original else "德语 + 原文")
 
     def _place_on_screen(self) -> None:
         target = self._target_screen()

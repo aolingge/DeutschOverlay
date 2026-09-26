@@ -43,8 +43,28 @@ def main() -> int:
             if not image.save(str(path)):
                 raise RuntimeError(f"Could not save {path}")
             print(f"{name}: visible={overlay.isVisible()} size={image.width()}x{image.height()} path={path}")
+        overlay.set_locked(False)
+        overlay.show_caption(CaptionView(1, "controls", "拖动字幕条调整位置", None, True, 0.0), persistent=True)
+        app.processEvents()
+        assert overlay.control_bar.isVisible()
+        path = target / "windows-overlay-controls.png"
+        if not overlay.grab().save(str(path)):
+            raise RuntimeError(f"Could not save {path}")
+        print(f"controls: visible={overlay.control_bar.isVisible()} path={path}")
     finally:
         overlay.close()
+    narrow = CaptionOverlay(Settings(overlay_width=240, fade_seconds=30))
+    try:
+        narrow.set_locked(False)
+        narrow.show_caption(CaptionView(1, "narrow", "Hallo!", None, True, 0.0), persistent=True)
+        app.processEvents()
+        assert narrow.control_bar.minimumSizeHint().width() <= narrow.width()
+        path = target / "windows-overlay-controls-narrow.png"
+        if not narrow.grab().save(str(path)):
+            raise RuntimeError(f"Could not save {path}")
+        print(f"narrow_controls: size={narrow.width()}x{narrow.height()} path={path}")
+    finally:
+        narrow.close()
     return 0
 
 

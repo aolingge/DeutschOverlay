@@ -1,29 +1,33 @@
-"""Simple local controls for audio source, language, and caption appearance."""
+"""The user-facing controls for captions, appearance and online processing."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from deutsch_overlay.audio import OutputDevice
+from deutsch_overlay.choice_group import ChoiceGroup
 from deutsch_overlay.config import Settings
 from deutsch_overlay.learning_history_dialog import LearningHistoryDialog
+from deutsch_overlay.ui_theme import SETTINGS_STYLE
 
 
 STYLE_PRESETS = {
@@ -41,11 +45,20 @@ STYLE_PRESETS = {
                      padding_horizontal=20, padding_vertical=10, opacity=0.85),
 }
 
+EDITABLE_FIELDS = (
+    "mode", "language_lock", "compare_original", "output_device_id", "overlay_position",
+    "overlay_width", "font_size", "opacity", "background_color", "primary_color",
+    "secondary_color", "border_color", "border_width", "corner_radius",
+    "padding_horizontal", "padding_vertical", "fade_seconds", "online_minutes_limit",
+)
+
 
 class SettingsWindow(QWidget):
     settings_changed = Signal(object)
     credentials_submitted = Signal(str, str)
     unlock_requested = Signal()
+    visibility_requested = Signal()
+    pause_requested = Signal()
     models_help_requested = Signal()
     refresh_devices_requested = Signal()
     reset_position_requested = Signal()
@@ -55,154 +68,366 @@ class SettingsWindow(QWidget):
     def __init__(self, settings: Settings, devices: list[OutputDevice]) -> None:
         super().__init__()
         self._settings = settings
-        self.setWindowTitle("Deutsch Overlay · 设置")
-        self.resize(520, 650)
+        self._devices = list(devices)
         self._updating_style = False
         self.close_exits = False
-        self._devices = list(devices)
-        form = QFormLayout()
+        self.setObjectName("settingsRoot")
+        self.setWindowTitle("Deutsch Overlay · 设置")
+        screen = QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        if available is None:
+            self.setMinimumSize(720, 610)
+            self.resize(860, 830)
+        else:
+            width = min(860, max(1, available.width() - 40))
+            height = min(830, max(1, available.height() - 80))
+            self.setMinimumSize(min(720, width), min(610, height))
+            self.resize(width, height)
+            self.move(available.left() + (available.width() - width) // 2,
+                      available.top() + (available.height() - height) // 2)
+        self.setFont(QFont("Segoe UI Variable", 10))
+        self.setStyleSheet(SETTINGS_STYLE)
 
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._build_sidebar())
+        root.addWidget(self._build_content(), 1)
+        self._show_page("subtitles")
+
+    def _build_sidebar(self) -> QWidget:
+        sidebar = QWidget(self)
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(188)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(16, 25, 16, 18)
+        layout.setSpacing(8)
+        brand = QLabel("Deutsch Overlay")
+        brand.setObjectName("brand")
+        layout.addWidget(brand)
+        subtitle = QLabel("实时德语字幕")
+        subtitle.setObjectName("brandSubtitle")
+        layout.addWidget(subtitle)
+        layout.addSpacing(28)
+        section = QLabel("工作空间")
+        section.setObjectName("sidebarHint")
+        layout.addWidget(section)
+        self.nav_subtitles = self._nav_button("字幕", "subtitles")
+        self.nav_appearance = self._nav_button("外观", "appearance")
+        self.nav_online = self._nav_button("在线服务", "online")
+        for button in (self.nav_subtitles, self.nav_appearance, self.nav_online):
+            layout.addWidget(button)
+        layout.addStretch(1)
+        self.history_dialog = LearningHistoryDialog(self)
+        history_button = QPushButton("学习记录")
+        history_button.setObjectName("sideAction")
+        history_button.clicked.connect(self.history_dialog.show)
+        layout.addWidget(history_button)
+        models_button = QPushButton("本地模型说明")
+        models_button.setObjectName("sideAction")
+        models_button.clicked.connect(self.models_help_requested.emit)
+        layout.addWidget(models_button)
+        layout.addSpacing(10)
+        hotkeys = QLabel("快捷键  Ctrl + Alt + 1~4\n字幕 · 显隐 · 语言 · 暂停")
+        hotkeys.setObjectName("sidebarHint")
+        hotkeys.setWordWrap(True)
+        layout.addWidget(hotkeys)
+        return sidebar
+
+    def _nav_button(self, text: str, page: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName("navButton")
+        button.setCheckable(True)
+        button.clicked.connect(lambda: self._show_page(page))
+        return button
+
+    def _build_content(self) -> QWidget:
+        content = QWidget(self)
+        content.setObjectName("contentPane")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QWidget(content)
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(28, 22, 28, 12)
+        header_layout.setSpacing(4)
+        self.page_title = QLabel()
+        self.page_title.setObjectName("pageTitle")
+        self.page_description = QLabel()
+        self.page_description.setObjectName("pageDescription")
+        self.page_description.setWordWrap(True)
+        header_layout.addWidget(self.page_title)
+        header_layout.addWidget(self.page_description)
+        layout.addWidget(header)
+
+        self.pages = QStackedWidget(content)
+        self.settings_scroll = self._scroll_page(self._build_subtitles_page())
+        self.pages.addWidget(self.settings_scroll)
+        self.pages.addWidget(self._scroll_page(self._build_appearance_page()))
+        self.pages.addWidget(self._scroll_page(self._build_online_page()))
+        layout.addWidget(self.pages, 1)
+
+        footer = QWidget(content)
+        footer.setObjectName("footer")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(26, 13, 28, 13)
+        footer_layout.setSpacing(9)
+        self.status_label = QLabel("准备就绪")
+        self.status_label.setObjectName("statusLabel")
+        self.status_label.setWordWrap(True)
+        footer_layout.addWidget(self.status_label, 1)
+        self.apply_button = QPushButton("应用设置")
+        self.apply_button.clicked.connect(self._apply)
+        footer_layout.addWidget(self.apply_button)
+        self.preview_button = QPushButton("应用并预览")
+        self.preview_button.setObjectName("primaryButton")
+        self.preview_button.clicked.connect(self._apply_and_preview)
+        footer_layout.addWidget(self.preview_button)
+        layout.addWidget(footer)
+        return content
+
+    @staticmethod
+    def _scroll_page(body: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(body)
+        return scroll
+
+    @staticmethod
+    def _page_body() -> tuple[QWidget, QVBoxLayout]:
+        body = QWidget()
+        body.setObjectName("pageBody")
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(28, 7, 28, 20)
+        layout.setSpacing(13)
+        return body, layout
+
+    @staticmethod
+    def _card(title: str, hint: str = "") -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 15, 18, 17)
+        layout.setSpacing(9)
+        heading = QLabel(title)
+        heading.setObjectName("cardTitle")
+        layout.addWidget(heading)
+        if hint:
+            note = QLabel(hint)
+            note.setObjectName("hint")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        return card, layout
+
+    @staticmethod
+    def _field_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("fieldLabel")
+        return label
+
+    def _build_subtitles_page(self) -> QWidget:
+        body, page = self._page_body()
+        card, group = self._card("字幕内容", "德语始终显示在第一行；打开原文对照后，中文视频可同时看中德两行。")
+        self.subtitle_combo = ChoiceGroup(columns=2)
+        self.subtitle_combo.addItem("仅德语", False)
+        self.subtitle_combo.addItem("德语 + 原文", True)
+        self.subtitle_combo.setCurrentIndex(self.subtitle_combo.findData(self._settings.compare_original))
+        group.addWidget(self.subtitle_combo)
+        quick = QHBoxLayout()
+        self.visibility_button = QPushButton("隐藏字幕")
+        self.visibility_button.clicked.connect(self.visibility_requested.emit)
+        self.pause_button = QPushButton("暂停识别")
+        self.pause_button.clicked.connect(self.pause_requested.emit)
+        quick.addWidget(self.visibility_button)
+        quick.addWidget(self.pause_button)
+        group.addLayout(quick)
+        page.addWidget(card)
+
+        card, group = self._card("声音来源", "选择正在播放游戏或视频声音的设备。")
         self.device_combo = QComboBox()
-        self._set_devices(self._devices, settings.output_device_id)
-        refresh_button = QPushButton("刷新")
+        self._set_devices(self._devices, self._settings.output_device_id)
+        refresh_button = QPushButton("刷新设备")
         refresh_button.clicked.connect(self.refresh_devices_requested.emit)
-        device_row = QHBoxLayout()
-        device_row.addWidget(self.device_combo)
-        device_row.addWidget(refresh_button)
-        form.addRow("电脑声音", device_row)
+        row = QHBoxLayout()
+        row.addWidget(self.device_combo, 1)
+        row.addWidget(refresh_button)
+        group.addLayout(row)
         self.audio_level_label = QLabel("等待声音采集")
+        self.audio_level_label.setObjectName("hint")
         self.audio_level_label.setWordWrap(True)
-        form.addRow("输入状态", self.audio_level_label)
-
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("本地（默认）", "local")
-        self.mode_combo.addItem("在线", "online")
-        self.mode_combo.setCurrentIndex(self.mode_combo.findData(settings.mode))
-        form.addRow("处理模式", self.mode_combo)
-
-        self.language_combo = QComboBox()
+        group.addWidget(self.audio_level_label)
+        group.addWidget(self._field_label("声音语言"))
+        self.language_combo = ChoiceGroup(columns=4)
         for label, code in (("自动识别", "auto"), ("德语", "de"), ("英语", "en"), ("中文", "zh")):
             self.language_combo.addItem(label, code)
-        self.language_combo.setCurrentIndex(self.language_combo.findData(settings.language_lock))
-        form.addRow("声音语言", self.language_combo)
+        self.language_combo.setCurrentIndex(self.language_combo.findData(self._settings.language_lock))
+        group.addWidget(self.language_combo)
+        page.addWidget(card)
 
-        self.subtitle_combo = QComboBox()
-        self.subtitle_combo.addItem("仅德语", False)
-        self.subtitle_combo.addItem("德语 + 原文（中文语音时显示中德双语）", True)
-        self.subtitle_combo.setCurrentIndex(self.subtitle_combo.findData(settings.compare_original))
-        form.addRow("字幕内容", self.subtitle_combo)
-        self.position_combo = QComboBox()
+        card, group = self._card("字幕位置", "选一个大致位置，或解锁字幕条直接拖动。")
+        self.position_combo = ChoiceGroup(columns=3)
         for label, code in (
-            ("左上", "top-left"), ("上方居中", "top-center"), ("右上", "top-right"),
-            ("左侧居中", "middle-left"), ("屏幕中央", "middle-center"), ("右侧居中", "middle-right"),
-            ("左下", "bottom-left"), ("下方居中", "bottom-center"), ("右下", "bottom-right"),
-            ("自定义拖动", "custom"),
+            ("左上", "top-left"), ("上方", "top-center"), ("右上", "top-right"),
+            ("左侧", "middle-left"), ("中央", "middle-center"), ("右侧", "middle-right"),
+            ("左下", "bottom-left"), ("下方", "bottom-center"), ("右下", "bottom-right"),
         ):
             self.position_combo.addItem(label, code)
-        self.position_combo.setCurrentIndex(self.position_combo.findData(settings.overlay_position))
-        form.addRow("字幕位置", self.position_combo)
-        self.speed_hint = QLabel("在线模式锁定声音语言时，可更早显示临时译文；自动识别多语言通常要等整句。")
-        self.speed_hint.setWordWrap(True)
-        form.addRow("速度提示", self.speed_hint)
-        self.width_spin = QSpinBox()
-        self.width_spin.setRange(240, 3840)
-        self.width_spin.setValue(settings.overlay_width)
-        form.addRow("字幕宽度", self.width_spin)
-        self.font_spin = QSpinBox()
-        self.font_spin.setRange(12, 72)
-        self.font_spin.setValue(settings.font_size)
-        form.addRow("字体大小", self.font_spin)
-        self.opacity_spin = QDoubleSpinBox()
-        self.opacity_spin.setRange(0, 1.0)
-        self.opacity_spin.setSingleStep(0.05)
-        self.opacity_spin.setValue(settings.opacity)
-        form.addRow("背景不透明度", self.opacity_spin)
+        self.position_combo.addItem("自定义拖动", "custom", span=3)
+        self.position_combo.setCurrentIndex(self.position_combo.findData(self._settings.overlay_position))
+        self.position_combo.button_for_data("custom").hide()
+        group.addWidget(self.position_combo)
+        self.custom_position_note = QLabel("当前使用自定义位置；选择上方九宫格可恢复预设位置。")
+        self.custom_position_note.setObjectName("hint")
+        self.custom_position_note.setVisible(self._settings.overlay_position == "custom")
+        group.addWidget(self.custom_position_note)
+        position_actions = QHBoxLayout()
+        unlock_button = QPushButton("解锁并拖动")
+        unlock_button.clicked.connect(self.unlock_requested.emit)
+        reset_button = QPushButton("恢复下方位置")
+        reset_button.clicked.connect(self.reset_position_requested.emit)
+        position_actions.addWidget(unlock_button)
+        position_actions.addWidget(reset_button)
+        group.addLayout(position_actions)
+        page.addWidget(card)
+        page.addStretch(1)
+        return body
 
-        self.style_combo = QComboBox()
+    def _build_appearance_page(self) -> QWidget:
+        body, page = self._page_body()
+        card, group = self._card("字幕风格", "先选一个样式，再按需要微调颜色和尺寸。")
+        self.style_combo = ChoiceGroup(columns=3)
         for label, code in (("深色", "dark"), ("浅色", "light"),
                             ("透明文字", "clear"), ("描边", "outlined"), ("自定义", "custom")):
             self.style_combo.addItem(label, code)
-        form.addRow("背景样式", self.style_combo)
-        self.background_button = self._color_button(settings.background_color, "背景")
-        self.primary_button = self._color_button(settings.primary_color, "德语文字")
-        self.secondary_button = self._color_button(settings.secondary_color, "原文")
-        self.border_button = self._color_button(settings.border_color, "边框")
-        for label, button in (("背景颜色", self.background_button), ("德语文字颜色", self.primary_button),
+        group.addWidget(self.style_combo)
+        page.addWidget(card)
+
+        card, group = self._card("尺寸与显示")
+        form = QFormLayout()
+        form.setSpacing(10)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(240, 3840)
+        self.width_spin.setSuffix(" px")
+        self.width_spin.setValue(self._settings.overlay_width)
+        form.addRow(self._field_label("字幕宽度"), self.width_spin)
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(12, 72)
+        self.font_spin.setSuffix(" pt")
+        self.font_spin.setValue(self._settings.font_size)
+        form.addRow(self._field_label("德语字号"), self.font_spin)
+        self.fade_spin = QDoubleSpinBox()
+        self.fade_spin.setRange(0, 30)
+        self.fade_spin.setSuffix(" 秒")
+        self.fade_spin.setValue(self._settings.fade_seconds)
+        form.addRow(self._field_label("无语音后隐藏"), self.fade_spin)
+        self.opacity_spin = QDoubleSpinBox()
+        self.opacity_spin.setRange(0, 1.0)
+        self.opacity_spin.setSingleStep(0.05)
+        self.opacity_spin.setDecimals(2)
+        self.opacity_spin.setValue(self._settings.opacity)
+        form.addRow(self._field_label("背景不透明度"), self.opacity_spin)
+        group.addLayout(form)
+        page.addWidget(card)
+
+        card, group = self._card("颜色与边框")
+        form = QFormLayout()
+        form.setSpacing(10)
+        self.background_button = self._color_button(self._settings.background_color, "背景")
+        self.primary_button = self._color_button(self._settings.primary_color, "德语文字")
+        self.secondary_button = self._color_button(self._settings.secondary_color, "原文")
+        self.border_button = self._color_button(self._settings.border_color, "边框")
+        for label, button in (("背景颜色", self.background_button), ("德语文字", self.primary_button),
                               ("原文颜色", self.secondary_button), ("边框颜色", self.border_button)):
-            form.addRow(label, button)
+            form.addRow(self._field_label(label), button)
         self.border_spin = QSpinBox()
         self.border_spin.setRange(0, 8)
-        self.border_spin.setValue(settings.border_width)
-        form.addRow("边框宽度", self.border_spin)
+        self.border_spin.setValue(self._settings.border_width)
+        form.addRow(self._field_label("边框宽度"), self.border_spin)
         self.radius_spin = QSpinBox()
         self.radius_spin.setRange(0, 32)
-        self.radius_spin.setValue(settings.corner_radius)
-        form.addRow("圆角半径", self.radius_spin)
+        self.radius_spin.setValue(self._settings.corner_radius)
+        form.addRow(self._field_label("圆角半径"), self.radius_spin)
         self.padding_x_spin = QSpinBox()
         self.padding_x_spin.setRange(0, 40)
-        self.padding_x_spin.setValue(settings.padding_horizontal)
-        form.addRow("左右留白", self.padding_x_spin)
+        self.padding_x_spin.setValue(self._settings.padding_horizontal)
+        form.addRow(self._field_label("左右留白"), self.padding_x_spin)
         self.padding_y_spin = QSpinBox()
         self.padding_y_spin.setRange(0, 24)
-        self.padding_y_spin.setValue(settings.padding_vertical)
-        form.addRow("上下留白", self.padding_y_spin)
+        self.padding_y_spin.setValue(self._settings.padding_vertical)
+        form.addRow(self._field_label("上下留白"), self.padding_y_spin)
+        group.addLayout(form)
+        page.addWidget(card)
+        page.addStretch(1)
         self.style_combo.currentIndexChanged.connect(self._apply_preset)
         for spin in (self.opacity_spin, self.border_spin, self.radius_spin,
                      self.padding_x_spin, self.padding_y_spin):
             spin.valueChanged.connect(self._mark_custom)
-        self._select_matching_preset(settings)
-        self.fade_spin = QDoubleSpinBox()
-        self.fade_spin.setRange(0, 30)
-        self.fade_spin.setValue(settings.fade_seconds)
-        form.addRow("无语音后隐藏（秒）", self.fade_spin)
+        self._select_matching_preset(self._settings)
+        return body
+
+    def _build_online_page(self) -> QWidget:
+        body, page = self._page_body()
+        card, group = self._card("处理方式", "本地模式无需上传电脑声音。在线模式须本次运行手动开启，可能产生费用。")
+        self.mode_combo = ChoiceGroup(columns=2)
+        self.mode_combo.addItem("本地 · 默认", "local")
+        self.mode_combo.addItem("在线 · Azure", "online")
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData(self._settings.mode))
+        group.addWidget(self.mode_combo)
+        self.speed_hint = QLabel("在线模式固定声音语言通常能更早显示临时译文；自动识别多语言一般需要等待整句。")
+        self.speed_hint.setObjectName("hint")
+        self.speed_hint.setWordWrap(True)
+        group.addWidget(self.speed_hint)
+        page.addWidget(card)
+
+        card, group = self._card("每日在线用量", "此上限只约束本应用发送的音频分钟数；请同时在 Azure 设置账单预算。")
         self.online_limit_spin = QSpinBox()
         self.online_limit_spin.setRange(1, 1440)
-        self.online_limit_spin.setValue(settings.online_minutes_limit)
-        form.addRow("每日在线上限（分钟）", self.online_limit_spin)
+        self.online_limit_spin.setSuffix(" 分钟")
+        self.online_limit_spin.setValue(self._settings.online_minutes_limit)
+        group.addWidget(self.online_limit_spin)
+        page.addWidget(card)
 
+        card, group = self._card("Azure 连接", "凭据只存入 Windows 凭据管理器，不写入设置文件。")
+        form = QFormLayout()
+        form.setSpacing(11)
         self.region_input = QLineEdit()
-        self.region_input.setPlaceholderText("Azure 区域，例如 eastasia")
-        form.addRow("Azure 区域", self.region_input)
+        self.region_input.setPlaceholderText("例如 eastasia")
+        form.addRow(self._field_label("区域"), self.region_input)
         self.key_input = QLineEdit()
         self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key_input.setPlaceholderText("只存入 Windows 凭据管理器")
-        form.addRow("Azure 密钥", self.key_input)
-
-        self.status_label = QLabel("准备就绪")
-        self.status_label.setWordWrap(True)
-        apply_button = QPushButton("应用设置")
-        apply_button.clicked.connect(self._apply)
-        preview_button = QPushButton("应用并预览")
-        preview_button.clicked.connect(self._apply_and_preview)
+        self.key_input.setPlaceholderText("粘贴 Azure Speech 密钥")
+        form.addRow(self._field_label("密钥"), self.key_input)
+        group.addLayout(form)
         save_key_button = QPushButton("保存在线凭据")
         save_key_button.clicked.connect(self._submit_credentials)
-        unlock_button = QPushButton("解锁/锁定字幕位置")
-        unlock_button.clicked.connect(self.unlock_requested.emit)
-        reset_position_button = QPushButton("字幕位置复位")
-        reset_position_button.clicked.connect(self.reset_position_requested.emit)
-        models_button = QPushButton("模型说明")
-        models_button.clicked.connect(self.models_help_requested.emit)
-        self.history_dialog = LearningHistoryDialog(self)
-        history_button = QPushButton("学习记录（本次运行）")
-        history_button.clicked.connect(self.history_dialog.show)
-        buttons = QHBoxLayout()
-        buttons.addWidget(apply_button)
-        buttons.addWidget(preview_button)
-        buttons.addWidget(save_key_button)
-        panel = QWidget()
-        panel.setLayout(form)
-        self.settings_scroll = QScrollArea()
-        self.settings_scroll.setWidgetResizable(True)
-        self.settings_scroll.setWidget(panel)
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.settings_scroll, 1)
-        layout.addWidget(unlock_button)
-        layout.addWidget(reset_position_button)
-        layout.addWidget(models_button)
-        layout.addWidget(history_button)
-        layout.addLayout(buttons)
-        layout.addWidget(self.status_label)
-        layout.addWidget(QLabel("快捷键：Ctrl+Alt+1 原文；2 显隐；3 语言；4 暂停"))
+        group.addWidget(save_key_button)
+        page.addWidget(card)
+        page.addStretch(1)
+        return body
+
+    def _show_page(self, page: str) -> None:
+        pages = {
+            "subtitles": (0, "字幕", "选好声音和字幕，开始听德语。"),
+            "appearance": (1, "外观", "让字幕条适合你正在看的画面。"),
+            "online": (2, "在线服务", "需要更快的在线译文时，在这里管理模式与用量。"),
+        }
+        index, title, description = pages[page]
+        self.pages.setCurrentIndex(index)
+        self.page_title.setText(title)
+        self.page_description.setText(description)
+        for name, button in (("subtitles", self.nav_subtitles),
+                             ("appearance", self.nav_appearance), ("online", self.nav_online)):
+            button.setChecked(name == page)
+
+    def current_page(self) -> str:
+        return ("subtitles", "appearance", "online")[self.pages.currentIndex()]
+
+    def set_runtime_controls(self, *, visible: bool, paused: bool) -> None:
+        self.visibility_button.setText("隐藏字幕" if visible else "显示字幕")
+        self.pause_button.setText("继续识别" if paused else "暂停识别")
+
+    def has_pending_changes(self) -> bool:
+        return self._candidate_settings() != self._settings
 
     @staticmethod
     def _set_button_color(button: QPushButton, color: str) -> None:
@@ -210,7 +435,7 @@ class SettingsWindow(QWidget):
         button.setText(color)
         value = QColor(color)
         foreground = "#111111" if value.lightness() > 150 else "#FFFFFF"
-        button.setStyleSheet(f"background-color: {color}; color: {foreground};")
+        button.setStyleSheet(f"background-color: {color}; color: {foreground}; border-radius: 8px;")
 
     def _color_button(self, color: str, name: str) -> QPushButton:
         button = QPushButton()
@@ -281,12 +506,10 @@ class SettingsWindow(QWidget):
         )
 
     def _apply(self) -> None:
-        settings = self._candidate_settings()
-        self.settings_changed.emit(settings)
+        self.settings_changed.emit(self._candidate_settings())
 
     def _apply_and_preview(self) -> None:
-        settings = self._candidate_settings()
-        self.preview_requested.emit(settings)
+        self.preview_requested.emit(self._candidate_settings())
 
     def _submit_credentials(self) -> None:
         region = self.region_input.text().strip()
@@ -306,27 +529,33 @@ class SettingsWindow(QWidget):
             self.audio_level_label.setText("正在接收电脑播放声")
 
     def update_settings(self, settings: Settings) -> None:
+        pending = self._candidate_settings()
+        display = replace(settings, **{
+            name: getattr(pending, name) for name in EDITABLE_FIELDS
+            if getattr(pending, name) != getattr(self._settings, name)
+        })
         self._settings = settings
-        self._set_devices(self._devices, settings.output_device_id)
-        self.mode_combo.setCurrentIndex(self.mode_combo.findData(settings.mode))
-        self.language_combo.setCurrentIndex(self.language_combo.findData(settings.language_lock))
-        self.subtitle_combo.setCurrentIndex(self.subtitle_combo.findData(settings.compare_original))
-        self.position_combo.setCurrentIndex(self.position_combo.findData(settings.overlay_position))
-        self.width_spin.setValue(settings.overlay_width)
-        self.font_spin.setValue(settings.font_size)
-        self.opacity_spin.setValue(settings.opacity)
+        self._set_devices(self._devices, display.output_device_id)
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData(display.mode))
+        self.language_combo.setCurrentIndex(self.language_combo.findData(display.language_lock))
+        self.subtitle_combo.setCurrentIndex(self.subtitle_combo.findData(display.compare_original))
+        self.position_combo.setCurrentIndex(self.position_combo.findData(display.overlay_position))
+        self.custom_position_note.setVisible(display.overlay_position == "custom")
+        self.width_spin.setValue(display.overlay_width)
+        self.font_spin.setValue(display.font_size)
+        self.opacity_spin.setValue(display.opacity)
         for name, button in (("background_color", self.background_button),
                              ("primary_color", self.primary_button),
                              ("secondary_color", self.secondary_button),
                              ("border_color", self.border_button)):
-            self._set_button_color(button, getattr(settings, name))
-        self.border_spin.setValue(settings.border_width)
-        self.radius_spin.setValue(settings.corner_radius)
-        self.padding_x_spin.setValue(settings.padding_horizontal)
-        self.padding_y_spin.setValue(settings.padding_vertical)
-        self._select_matching_preset(settings)
-        self.fade_spin.setValue(settings.fade_seconds)
-        self.online_limit_spin.setValue(settings.online_minutes_limit)
+            self._set_button_color(button, getattr(display, name))
+        self.border_spin.setValue(display.border_width)
+        self.radius_spin.setValue(display.corner_radius)
+        self.padding_x_spin.setValue(display.padding_horizontal)
+        self.padding_y_spin.setValue(display.padding_vertical)
+        self._select_matching_preset(display)
+        self.fade_spin.setValue(display.fade_seconds)
+        self.online_limit_spin.setValue(display.online_minutes_limit)
 
     def replace_devices(self, devices: list[OutputDevice]) -> None:
         selected = self.device_combo.currentData()
