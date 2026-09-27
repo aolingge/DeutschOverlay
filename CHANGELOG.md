@@ -25,6 +25,12 @@
 - 显示器连接、主屏、可用区域或缩放变化后字幕条重新排版；原显示器恢复时尝试回到保存位置。
 - 设置页补充无障碍名称与标签关联。
 
+### 发行与仓库
+
+- 新增 `scripts/install-release.ps1`：先核对压缩包 SHA-256，再解包并调用 `install-local.ps1`，完成逐文件校验、模型自检和桌面/开始菜单快捷方式创建；`-VerifyOnly` 只校验不安装。该脚本随 release 一起提供。
+- 发行包内现在附带 `LICENSE`、`THIRD-PARTY-NOTICES.md`、`SECURITY.md`、`CHANGELOG.md`（与 README、MODEL_SOURCES 一起），再次分发时许可信息随包同行。
+- 仓库补齐 CI（pytest + 覆盖率 + 冻结包自检）、Dependabot、EditorConfig、Issue/PR 模板、[CONTRIBUTING.md](CONTRIBUTING.md)、[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)，并新增打包契约测试（许可文件是否随包、脚本能否解析、校验和不匹配时拒绝安装）。
+
 ### 已知限制
 
 - 独占全屏、独占音频、部分反作弊游戏与受保护视频可能阻止采集或覆盖显示。

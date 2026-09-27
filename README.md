@@ -13,6 +13,18 @@ Windows 11 上的德语实时字幕条。它识别电脑正在播放的声音：
 
 到 [Releases](https://github.com/aolingge/DeutschOverlay/releases/latest) 下载 `DeutschOverlay-0.1.0-win64.7z`（约 1.5 GB，解压后约 3 GB）：
 
+### 方式一：一键安装脚本（推荐）
+
+把 `DeutschOverlay-0.1.0-win64.7z`、`SHA256SUMS.txt` 和 `install-release.ps1` 下载到同一个文件夹，然后：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-release.ps1
+```
+
+脚本会先核对压缩包的 SHA-256（不匹配就拒绝安装），再解压到临时目录，把完整文件夹复制进 `%LOCALAPPDATA%\Programs\DeutschOverlay\`，逐文件校验后运行模型自检，最后创建桌面和开始菜单快捷方式。加 `-VerifyOnly` 可以只校验不安装。
+
+### 方式二：手动解压
+
 1. 用 7-Zip、WinRAR、Bandizip 或 Windows 11 24H2 及以上的资源管理器把压缩包**完整解压**到一个目录；
 2. 双击解压目录里的 `DeutschOverlay.exe`；
 3. 首次运行会打开设置窗口，选好字幕内容和播放设备即可，应用会留在系统托盘。
@@ -20,6 +32,7 @@ Windows 11 上的德语实时字幕条。它识别电脑正在播放的声音：
 - **不要只复制 EXE**：识别需要与它同目录的 `models` 文件夹。
 - 系统要求：Windows 11 x64、约 6 GB 可用磁盘空间。没有 NVIDIA 显卡或显存不足时会自动回退到 CPU（更慢）。
 - 校验下载：`Get-FileHash .\DeutschOverlay-0.1.0-win64.7z -Algorithm SHA256`，与 release 页面附带的 `SHA256SUMS.txt` 对照。
+- 压缩包内同时附有 `LICENSE`、`THIRD-PARTY-NOTICES.md`、`SECURITY.md` 和 `CHANGELOG.md`，再次分发时请一并保留。
 
 ## 主要功能
 
@@ -103,6 +116,7 @@ $env:DEUTSCH_OVERLAY_MODELS = (Join-Path (Get-Location) 'models')
 
 ## 贡献
 
+- 想改代码请先看 [CONTRIBUTING.md](CONTRIBUTING.md)；参与讨论即表示接受 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 - 提 Issue 时请写明：Windows 版本、显卡与显存、复现步骤、设置窗口状态栏显示的文字。**不要**附带真实 Azure 密钥、录音文件或含用户名的完整路径。
 - 提 PR 前请运行 `python -m pytest -q --cov=deutsch_overlay --cov-report=term`，并在 [CHANGELOG.md](CHANGELOG.md) 里记录面向用户的改动。
 - 安全与隐私问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要开公开 Issue。
@@ -117,10 +131,10 @@ $env:DEUTSCH_OVERLAY_MODELS = (Join-Path (Get-Location) 'models')
 
 **Deutsch Overlay** is a Windows 11 overlay that turns whatever your PC is playing into a live German caption bar: German speech is shown as-is, while English and Chinese speech is translated into German. It targets borderless-fullscreen games and ordinary video.
 
-- **Download**: grab `DeutschOverlay-0.1.0-win64.7z` from [Releases](https://github.com/aolingge/DeutschOverlay/releases/latest), extract the archive completely (the `models` folder next to the executable is required), then run `DeutschOverlay.exe`.
+- **Download**: grab `DeutschOverlay-0.1.0-win64.7z` from [Releases](https://github.com/aolingge/DeutschOverlay/releases/latest) and either run the shipped `install-release.ps1` (it verifies the SHA-256, copies the app into your profile, self-tests it and creates the shortcuts) or extract the archive completely and run `DeutschOverlay.exe` (the `models` folder next to the executable is required).
 - **Privacy**: local mode is fully offline (faster-whisper + CTranslate2) and never records or uploads audio. Online mode uses Azure Speech and is opt-in, with credentials kept in Windows Credential Manager. See [SECURITY.md](SECURITY.md).
 - **Source layout**: `src/deutsch_overlay/` (app, audio capture, engines, overlay, settings UI), `tests/` (pytest, ~200 tests, 90% coverage), `scripts/` (model preparation, EXE build, local install, QA harness). The UI is in Chinese; the setup and packaging commands are under [从源码运行与打包](#从源码运行与打包) above.
 - **Verification**: [docs/verification.md](docs/verification.md) records exactly what was tested on real hardware and what was not. It is written in Chinese and is deliberately honest about the gaps (real games, human voices, monitor hot-plug, live Azure accounts).
 - **License**: MIT for this project's source; bundled third-party components and models keep their own upstream licenses — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-Issues and pull requests are welcome. Please keep credentials and recorded audio out of reports.
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Please keep credentials and recorded audio out of reports.

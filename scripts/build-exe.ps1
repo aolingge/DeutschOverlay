@@ -47,8 +47,19 @@ foreach ($name in @('ffi.dll', 'libexpat.dll', 'libcrypto-3-x64.dll', 'libssl-3-
         Copy-Item -LiteralPath $source -Destination (Join-Path $appDir "_internal\$name") -Force
     }
 }
-Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $appDir -Force
-Copy-Item -LiteralPath (Join-Path $projectRoot 'MODEL_SOURCES.md') -Destination $appDir -Force
+# The distributed folder must carry the user documentation plus the licence and
+# third-party notices: the package contains LGPL-3.0 Qt, CUDA runtime libraries
+# and three openly licensed models, so the notices have to travel with it.
+foreach ($document in @(
+        'README.md',
+        'MODEL_SOURCES.md',
+        'LICENSE',
+        'THIRD-PARTY-NOTICES.md',
+        'SECURITY.md',
+        'CHANGELOG.md'
+    )) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot $document) -Destination $appDir -Force
+}
 
 if (-not $SkipModels) {
     $models = Join-Path $projectRoot 'models'

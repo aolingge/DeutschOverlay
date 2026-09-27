@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 私下报告安全或隐私问题
+    url: https://github.com/aolingge/DeutschOverlay/security/advisories/new
+    about: 漏洞、凭据泄露、隐私问题请走私密渠道，不要开公开 Issue。
+  - name: 使用问题先看文档
+    url: https://github.com/aolingge/DeutschOverlay#使用
+    about: 安装、模式切换、快捷键、常见限制都在 README 里。

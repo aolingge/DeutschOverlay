@@ -1,17 +1,52 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "deutsch-overlay"
 version = "0.1.0"
 description = "German live captions for Windows games and videos"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.14"
+authors = [
+  { name = "Aolinge", email = "153434584+aolingge@users.noreply.github.com" },
+]
+keywords = [
+  "captions",
+  "german",
+  "language-learning",
+  "overlay",
+  "speech-translation",
+  "subtitles",
+  "whisper",
+  "windows",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Win32 (MS Windows)",
+  "Intended Audience :: End Users/Desktop",
+  "Natural Language :: German",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Education",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
 dependencies = [
   "PySide6>=6.8,<7",
   "numpy>=1.26,<3",
   "SoundCard>=0.4.4,<0.5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/aolingge/DeutschOverlay"
+Repository = "https://github.com/aolingge/DeutschOverlay"
+Issues = "https://github.com/aolingge/DeutschOverlay/issues"
+Changelog = "https://github.com/aolingge/DeutschOverlay/blob/main/CHANGELOG.md"
+Releases = "https://github.com/aolingge/DeutschOverlay/releases"
+Documentation = "https://github.com/aolingge/DeutschOverlay/tree/main/docs"
 
 [project.optional-dependencies]
 local = [

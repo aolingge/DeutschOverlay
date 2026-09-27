@@ -1,0 +1,38 @@
+name: 功能建议
+description: 希望新增或改进某个能力
+title: "[建议] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        建议先看一眼 [README 的限制一节](https://github.com/aolingge/DeutschOverlay#限制)：
+        受保护音频、独占模式游戏音轨、同时监听多个端点等目前是已知边界。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 说你实际遇到的场景，而不是直接给实现方案。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 希望它怎么工作
+      placeholder: 例如：字幕条可以用快捷键切换成只显示中文。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 你试过的替代做法
+    validations:
+      required: false
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: 确认
+      options:
+        - label: 这个功能可以保持默认离线、且不把音频发给未声明的第三方
+          required: true

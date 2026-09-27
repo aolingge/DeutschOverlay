@@ -1,13 +1,18 @@
 param(
-    [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\DeutschOverlay')
+    [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\DeutschOverlay'),
+    [string]$Source = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$source = Join-Path $projectRoot 'dist\DeutschOverlay'
+if ([string]::IsNullOrWhiteSpace($Source)) {
+    $source = Join-Path $projectRoot 'dist\DeutschOverlay'
+} else {
+    $source = (Resolve-Path -LiteralPath $Source).Path
+}
 $sourceExe = Join-Path $source 'DeutschOverlay.exe'
 if (-not (Test-Path -LiteralPath $sourceExe)) {
-    throw 'Please build the complete DeutschOverlay distribution first.'
+    throw "The folder to install from does not contain DeutschOverlay.exe: $source"
 }
 
 function Get-PackageManifest([string]$Folder) {
