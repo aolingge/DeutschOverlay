@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QMouseEvent
+from PySide6.QtGui import QGuiApplication, QMouseEvent, QScreen
 from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from deutsch_overlay.captions import CaptionView
@@ -86,6 +86,56 @@ class CaptionOverlay(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide_caption)
         self.set_style(settings)
+        self._screen_relayout_timer = QTimer(self)
+        self._screen_relayout_timer.setSingleShot(True)
+        self._screen_relayout_timer.timeout.connect(self._fit_text)
+        self._observed_screens: list[QScreen] = []
+        self._screen_app = QGuiApplication.instance()
+        if self._screen_app is not None:
+            self._screen_app.screenAdded.connect(self._on_screen_added)
+            self._screen_app.screenRemoved.connect(self._on_screen_removed)
+            self._screen_app.primaryScreenChanged.connect(self._queue_screen_relayout)
+            for screen in QGuiApplication.screens():
+                self._watch_screen(screen)
+
+    def _watch_screen(self, screen: QScreen) -> None:
+        if screen in self._observed_screens:
+            return
+        self._observed_screens.append(screen)
+        screen.availableGeometryChanged.connect(self._queue_screen_relayout)
+        screen.geometryChanged.connect(self._queue_screen_relayout)
+        screen.logicalDotsPerInchChanged.connect(self._queue_screen_relayout)
+
+    def _forget_screen(self, screen: QScreen) -> None:
+        if screen not in self._observed_screens:
+            return
+        self._observed_screens.remove(screen)
+        for signal in (screen.availableGeometryChanged, screen.geometryChanged,
+                       screen.logicalDotsPerInchChanged):
+            signal.disconnect(self._queue_screen_relayout)
+
+    def _on_screen_added(self, screen: QScreen) -> None:
+        self._watch_screen(screen)
+        self._queue_screen_relayout()
+
+    def _on_screen_removed(self, screen: QScreen) -> None:
+        self._forget_screen(screen)
+        self._queue_screen_relayout()
+
+    def _queue_screen_relayout(self, *_args) -> None:
+        # Run after Qt updates its screen list and moves windows from removed displays.
+        self._screen_relayout_timer.start(0)
+
+    def closeEvent(self, event) -> None:
+        self._screen_relayout_timer.stop()
+        if self._screen_app is not None:
+            self._screen_app.screenAdded.disconnect(self._on_screen_added)
+            self._screen_app.screenRemoved.disconnect(self._on_screen_removed)
+            self._screen_app.primaryScreenChanged.disconnect(self._queue_screen_relayout)
+            self._screen_app = None
+        for screen in tuple(self._observed_screens):
+            self._forget_screen(screen)
+        super().closeEvent(event)
 
     def _apply_flags(self) -> None:
         flags = (

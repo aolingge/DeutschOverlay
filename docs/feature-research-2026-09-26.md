@@ -21,3 +21,7 @@
 | [微软按进程环回音频样例](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/) | 官方 API 可按进程树筛选，并不绑定单个端点，要求 Windows 10 Build 20348 或更新版本。此能力仍需原生组件及实际游戏验证，当前不并入默认采音链路。 |
 
 本轮未增加依赖、后台服务或收费识别调用。采用先修复可复现可靠性问题的做法：GPU 解码期失败回退 CPU、在线静音停流保留最后结果、最终字幕不被晚到的临时字幕覆盖，并调整空记录复制和设置反馈。未来要比较新识别后端，应先用相同真人语音、同一硬件测准确率、端到端延迟和包体积，再决定是否替换已验证的本地链路。
+
+## 2026-09-27 显示器变化处理
+
+[Qt 的 QGuiApplication 文档](https://doc.qt.io/qtforpython-6/PySide6/QtGui/QGuiApplication.html)提供显示器添加、移除及主屏变化信号；[QScreen 文档](https://doc.qt.io/qt-6/qscreen.html)提供屏幕几何、可用区域及逻辑 DPI 变化信号。字幕条监听这些事件，并在 Qt 完成显示器列表和窗口更新后重新计算宽度与位置。这样，显示器断开或工作区域缩小时，已显示的字幕可以回到可用屏幕；原显示器重新出现时，保存的自定义坐标仍可恢复。该处理已通过模拟信号回归，尚未用实体显示器热拔插验收。

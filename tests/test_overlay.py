@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QGuiApplication
 
@@ -206,6 +206,75 @@ def test_saved_position_near_monitor_edge_is_clamped(qapp):
     overlay = CaptionOverlay(Settings(overlay_x=rect.right() - 5, overlay_y=rect.top(), overlay_position="custom", overlay_width=240))
     assert overlay.x() + overlay.width() <= rect.right() + 1
     overlay.close()
+
+
+def test_visible_overlay_reflows_when_screen_work_area_changes(qapp, monkeypatch):
+    from PySide6.QtTest import QTest
+
+    class Screen:
+        rect = QRect(100, 70, 360, 280)
+
+        def availableGeometry(self):
+            return self.rect
+
+    overlay = CaptionOverlay(Settings(
+        overlay_x=700, overlay_y=700, overlay_position="custom", overlay_width=300,
+    ))
+    try:
+        overlay.set_locked(False)
+        overlay.show_caption(view("你好"), persistent=True)
+        monkeypatch.setattr(overlay, "_target_screen", lambda: Screen())
+        qapp.primaryScreen().availableGeometryChanged.emit(Screen.rect)
+        QTest.qWait(20)
+        assert overlay.isVisible()
+        assert overlay.control_bar.isVisible()
+        assert Screen.rect.contains(overlay.geometry())
+        assert not overlay._hide_timer.isActive()
+    finally:
+        overlay.close()
+
+
+def test_visible_overlay_reflows_after_screen_is_removed(qapp, monkeypatch):
+    from PySide6.QtTest import QTest
+
+    class RemainingScreen:
+        def availableGeometry(self):
+            return QRect(0, 0, 400, 300)
+
+    overlay = CaptionOverlay(Settings(
+        overlay_x=700, overlay_y=700, overlay_position="custom", overlay_width=300,
+    ))
+    try:
+        overlay.set_locked(False)
+        overlay.show_caption(view(), persistent=True)
+        monkeypatch.setattr(overlay, "_target_screen", lambda: RemainingScreen())
+        qapp.screenRemoved.emit(qapp.primaryScreen())
+        QTest.qWait(20)
+        assert RemainingScreen().availableGeometry().contains(overlay.geometry())
+        assert overlay.isVisible()
+    finally:
+        overlay.close()
+
+
+def test_custom_position_returns_when_screen_is_added(qapp, monkeypatch):
+    from PySide6.QtTest import QTest
+
+    class RestoredScreen:
+        def availableGeometry(self):
+            return QRect(800, 0, 800, 800)
+
+    overlay = CaptionOverlay(Settings(
+        overlay_x=900, overlay_y=50, overlay_position="custom", overlay_width=240,
+    ))
+    try:
+        overlay.show_caption(view(), persistent=True)
+        assert (overlay.x(), overlay.y()) != (900, 50)
+        monkeypatch.setattr(overlay, "_target_screen", lambda: RestoredScreen())
+        qapp.screenAdded.emit(qapp.primaryScreen())
+        QTest.qWait(20)
+        assert (overlay.x(), overlay.y()) == (900, 50)
+    finally:
+        overlay.close()
 
 
 def test_position_preset_overrides_stale_saved_coordinates(qapp):
