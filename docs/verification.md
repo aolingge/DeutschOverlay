@@ -8,12 +8,14 @@
 - 仓库收尾：新增 [CONTRIBUTING.md](../CONTRIBUTING.md)、[CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)、Issue 表单（问题、建议、私密安全入口）、PR 模板、Dependabot、EditorConfig；`pyproject.toml` 补上 readme、SPDX `license = "MIT"`、authors、keywords、classifiers 与 project.urls，构建后端提升到 `setuptools>=77`（PEP 639），元数据经 setuptools 自身配置读取校验通过。
 - 本机全量测试 **205 项通过、11 项按环境跳过，覆盖率 90%**（比上一轮多 5 项，均为新增的打包契约、脚本解析与安装器校验测试）。markdown 相对链接检查覆盖 30 条链接，修复了 PR 模板里指向 CHANGELOG 的相对路径。
 - 发行包重建为 1622201403 字节（约 1547 MB），SHA-256 `c2bb75f4b3464bd9188c2d9ab00e6d23a666671774ed5201a9d3331bcc9f0b19`；release 附件在压缩包与校验和之外增加 `install-release.ps1`，发行说明与新校验和同步更新。
+- `v0.1.0` 的三个附件已全部替换为新产物并逐个核对：压缩包 1622201403 字节、GitHub 侧 digest `sha256:c2bb75f4b3464bd9188c2d9ab00e6d23a666671774ed5201a9d3331bcc9f0b19`（与本地一致），`SHA256SUMS.txt` 内容为新校验和，新增 `install-release.ps1`（6671 字节）。匿名访问发行下载地址返回 302 → 200，`Content-Length: 1622201403`；公开仓库页、发行页、LICENSE 与 CONTRIBUTING 页均返回 200。
+- Dependabot 按 `.github/dependabot.yml` 开始工作：本轮两个 Actions 更新 PR（#1 checkout 5 → 7、#2 setup-python 6 → 7）先在 PR 分支上通过 CI，再以 squash 合入 main（43c41ba、8a4be81），最终 main 上的 CI 运行 36296650728 通过。
 
 ## 2026-09-27 公开发布与首次云端 CI
 
 - 项目已发布到公开仓库 <https://github.com/aolingge/DeutschOverlay>（MIT 许可，默认分支 `main`）。发布前用 `git grep -I` 复查并移除了文档里的个人标识：用户目录路径 `C:\Users\aolin\...`、默认播放设备名、桌面快捷方式路径；仓库中不含密钥、录音、安装包或模型权重。
 - 首次 GitHub Actions 运行（`windows-latest`、Python 3.12、`pip install -e ".[local,online,dev]"`）结果：**199 项通过、12 项按环境跳过，覆盖率 89%**；冻结包布局检查 **3 项通过、1 项跳过**。比本机少 1 项通过，是因为 CI runner 没有 `nvidia.cudnn`/`nvidia.cublas`，`tests/test_gpu_runtime.py` 按 `importorskip` 跳过；其余跳过项均是需要真实播放设备、SAPI 语音或真实模型的显式条件跳过。
-- 可下载发行版 `DeutschOverlay-0.1.0-win64.7z`（1547 MB，解压后约 3 GB）与 `SHA256SUMS.txt` 作为 release 附件发布，SHA-256 为 `9c019a795543b14902606d0da58b30011e0a96c8b203b183019110855aeafea8`。README 的“下载与安装”与发行说明都指向该附件。
+- 可下载发行版 `DeutschOverlay-0.1.0-win64.7z`（1547 MB，解压后约 3 GB）与 `SHA256SUMS.txt` 作为 release 附件发布，SHA-256 为 `9c019a795543b14902606d0da58b30011e0a96c8b203b183019110855aeafea8`（该附件随后被重建版本替换，最终校验和见上一节）。README 的“下载与安装”与发行说明都指向该附件。
 - 发行包本身不进 Git 仓库（`.gitignore` 排除 `dist/`、`models/`、`release/`、`*.7z`），避免触碰 GitHub 的单文件大小限制；第三方组件与三套模型的许可清单见 `THIRD-PARTY-NOTICES.md`。
 - 仍未验收的部分与前几轮相同：实体显示器热拔插、具体游戏、真人口音、受保护/独占音频、多播放端点同时监听，以及真实 Azure 账户与账单链路。
 
