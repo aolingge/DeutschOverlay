@@ -1,5 +1,14 @@
 # 验证记录
 
+## 2026-09-27 发行完整性与仓库收尾
+
+- 发行包补齐许可文件：`scripts/build-exe.ps1` 现在把 `LICENSE`、`THIRD-PARTY-NOTICES.md`、`SECURITY.md`、`CHANGELOG.md` 与 README、MODEL_SOURCES 一起复制进 `dist/DeutschOverlay/`。此前发行包内的 README 是公开改写前的旧版（11981 字节），重建后包内 README 与仓库一致（17632 字节），可用 `7z l` 直接看到。`tests/test_package_layout.py` 新增契约测试，守住“许可与说明文件必须随包”和“打包脚本必须能解析”。
+- 新增 `scripts/install-release.ps1` 作为面向下载者的安装入口：先按 `SHA256SUMS.txt` 核对压缩包 SHA-256（不匹配即拒绝，提示里含 `failed its checksum`），再用系统自带 `tar.exe`（回退 7-Zip）解压到临时目录，最后以 `-Source` 调用 `install-local.ps1` 完成逐文件校验、冻结版模型自检和桌面/开始菜单快捷方式创建，成功后删除临时目录；`-VerifyOnly` 只校验不安装。校验行为由测试覆盖：正确哈希退出 0，错误哈希退出 1。
+- 用发布用的压缩包实跑了一次 `install-release.ps1`：校验通过，解压后安装到 `%LOCALAPPDATA%\Programs\DeutschOverlay\0.1.0-A4237EBBB5E8377C\DeutschOverlay.exe`，模型自检与音频自检未报错（本次未读取具体退出码，脚本会在失败时抛错），桌面与开始菜单快捷方式指向该版本（本机桌面在 OneDrive 重定向下）。脚本同时提示还有 7 个旧版本目录等待手动清理；这些目录未删除。
+- 仓库收尾：新增 [CONTRIBUTING.md](../CONTRIBUTING.md)、[CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)、Issue 表单（问题、建议、私密安全入口）、PR 模板、Dependabot、EditorConfig；`pyproject.toml` 补上 readme、SPDX `license = "MIT"`、authors、keywords、classifiers 与 project.urls，构建后端提升到 `setuptools>=77`（PEP 639），元数据经 setuptools 自身配置读取校验通过。
+- 本机全量测试 **205 项通过、11 项按环境跳过，覆盖率 90%**（比上一轮多 5 项，均为新增的打包契约、脚本解析与安装器校验测试）。markdown 相对链接检查覆盖 30 条链接，修复了 PR 模板里指向 CHANGELOG 的相对路径。
+- 发行包重建为 1622201403 字节（约 1547 MB），SHA-256 `c2bb75f4b3464bd9188c2d9ab00e6d23a666671774ed5201a9d3331bcc9f0b19`；release 附件在压缩包与校验和之外增加 `install-release.ps1`，发行说明与新校验和同步更新。
+
 ## 2026-09-27 公开发布与首次云端 CI
 
 - 项目已发布到公开仓库 <https://github.com/aolingge/DeutschOverlay>（MIT 许可，默认分支 `main`）。发布前用 `git grep -I` 复查并移除了文档里的个人标识：用户目录路径 `C:\Users\aolin\...`、默认播放设备名、桌面快捷方式路径；仓库中不含密钥、录音、安装包或模型权重。
