@@ -1,5 +1,13 @@
 # 验证记录
 
+## 2026-09-27 公开发布与首次云端 CI
+
+- 项目已发布到公开仓库 <https://github.com/aolingge/DeutschOverlay>（MIT 许可，默认分支 `main`）。发布前用 `git grep -I` 复查并移除了文档里的个人标识：用户目录路径 `C:\Users\aolin\...`、默认播放设备名、桌面快捷方式路径；仓库中不含密钥、录音、安装包或模型权重。
+- 首次 GitHub Actions 运行（`windows-latest`、Python 3.12、`pip install -e ".[local,online,dev]"`）结果：**199 项通过、12 项按环境跳过，覆盖率 89%**；冻结包布局检查 **3 项通过、1 项跳过**。比本机少 1 项通过，是因为 CI runner 没有 `nvidia.cudnn`/`nvidia.cublas`，`tests/test_gpu_runtime.py` 按 `importorskip` 跳过；其余跳过项均是需要真实播放设备、SAPI 语音或真实模型的显式条件跳过。
+- 可下载发行版 `DeutschOverlay-0.1.0-win64.7z`（1547 MB，解压后约 3 GB）与 `SHA256SUMS.txt` 作为 release 附件发布，SHA-256 为 `9c019a795543b14902606d0da58b30011e0a96c8b203b183019110855aeafea8`。README 的“下载与安装”与发行说明都指向该附件。
+- 发行包本身不进 Git 仓库（`.gitignore` 排除 `dist/`、`models/`、`release/`、`*.7z`），避免触碰 GitHub 的单文件大小限制；第三方组件与三套模型的许可清单见 `THIRD-PARTY-NOTICES.md`。
+- 仍未验收的部分与前几轮相同：实体显示器热拔插、具体游戏、真人口音、受保护/独占音频、多播放端点同时监听，以及真实 Azure 账户与账单链路。
+
 ## 2026-09-27 显示器变化修复
 
 - 字幕条现在响应显示器添加、移除、主屏切换、可用区域/几何及逻辑 DPI 变化，重新计算文字布局与位置。模拟屏幕缩小、移除和恢复的 3 项回归通过；解锁状态的控制栏与持久预览保持可见，自定义坐标在原屏幕恢复后重用。未用实体显示器热拔插测试。
