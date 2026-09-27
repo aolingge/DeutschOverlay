@@ -11,3 +11,7 @@ dist/
 *.egg-info/
 models/
 *.log
+release/
+*.7z
+*.zip
+SHA256SUMS.txt

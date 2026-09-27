@@ -1,6 +1,33 @@
 # Deutsch Overlay
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D4)](#下载与安装)
+[![Python](https://img.shields.io/badge/python-3.12-3776AB)](pyproject.toml)
+[![CI](https://github.com/aolingge/DeutschOverlay/actions/workflows/ci.yml/badge.svg)](https://github.com/aolingge/DeutschOverlay/actions/workflows/ci.yml)
+
 Windows 11 上的德语实时字幕条。它识别电脑正在播放的声音：德语直接显示德语；英语和中文翻译成德语。适合无边框全屏游戏和普通视频。
+
+![德语单行与中德双语字幕条](docs/assets/windows-overlay-bilingual.png)
+
+## 下载与安装
+
+到 [Releases](https://github.com/aolingge/DeutschOverlay/releases/latest) 下载 `DeutschOverlay-0.1.0-win64.7z`（约 1.5 GB，解压后约 3 GB）：
+
+1. 用 7-Zip、WinRAR、Bandizip 或 Windows 11 24H2 及以上的资源管理器把压缩包**完整解压**到一个目录；
+2. 双击解压目录里的 `DeutschOverlay.exe`；
+3. 首次运行会打开设置窗口，选好字幕内容和播放设备即可，应用会留在系统托盘。
+
+- **不要只复制 EXE**：识别需要与它同目录的 `models` 文件夹。
+- 系统要求：Windows 11 x64、约 6 GB 可用磁盘空间。没有 NVIDIA 显卡或显存不足时会自动回退到 CPU（更慢）。
+- 校验下载：`Get-FileHash .\DeutschOverlay-0.1.0-win64.7z -Algorithm SHA256`，与 release 页面附带的 `SHA256SUMS.txt` 对照。
+
+## 主要功能
+
+- 德语识别，以及英语、中文翻译成德语；语言可自动判断，也可固定成当前视频的语言。
+- **本地模式离线可用**，不录音、不上传；在线 Azure 模式按需开启，开启前不会连接。
+- 字幕条九宫格定位、解锁拖动并记忆自定义位置；四种外观预设，背景/文字/原文/边框颜色、不透明度、边框、圆角、内边距、宽度、字号均可调。
+- 自动跟随系统默认播放设备，也可手动指定；设备断开时提示“暂不可用”并等待重连，不会暗中切换。
+- 全局快捷键、系统托盘、单实例、学习记录（最近 200 条，只存在于内存）。
 
 ## 使用
 
@@ -73,3 +100,27 @@ $env:DEUTSCH_OVERLAY_MODELS = (Join-Path (Get-Location) 'models')
 安装 FFmpeg 和 FFplay 后，运行 `python -m pytest -q -s tests/test_video_playback.py`（同样需设置上述两个环境变量），可自动制作德、英、中三段已知台词的 MP4，用 FFplay 从默认播放设备播放，检查真实系统回采、自动语言判断、原文识别和德语翻译。测试会打印音频峰值和**已截取语音的模型处理耗时**；该数字不包含视频播放、句尾静音等待和设备初始化，不能当作屏幕字幕的总延迟。此测试播放的是合成语音，真人口音、背景音乐和游戏音效仍需用对应样本验证。
 
 模型来源与许可：[faster-whisper small](https://huggingface.co/Systran/faster-whisper-small)、[OPUS-MT 英语到德语](https://huggingface.co/Helsinki-NLP/opus-mt-en-de)、[OPUS-MT 中文到德语](https://huggingface.co/Helsinki-NLP/opus-mt-zh-de)。分发前应保留各模型随附的许可和署名资料。
+
+## 贡献
+
+- 提 Issue 时请写明：Windows 版本、显卡与显存、复现步骤、设置窗口状态栏显示的文字。**不要**附带真实 Azure 密钥、录音文件或含用户名的完整路径。
+- 提 PR 前请运行 `python -m pytest -q --cov=deutsch_overlay --cov-report=term`，并在 [CHANGELOG.md](CHANGELOG.md) 里记录面向用户的改动。
+- 安全与隐私问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要开公开 Issue。
+
+## 许可
+
+本仓库自有的源代码采用 [MIT 许可](LICENSE)。
+
+发行包内打包的第三方组件（Qt/PySide6、ONNX Runtime、CTranslate2、Transformers、NVIDIA CUDA 运行库等）与三套模型**不属于本项目的作品**，各自遵循其上游许可，完整清单见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 与 [MODEL_SOURCES.md](MODEL_SOURCES.md)。再次分发时请一并保留这些许可文件。
+
+## English
+
+**Deutsch Overlay** is a Windows 11 overlay that turns whatever your PC is playing into a live German caption bar: German speech is shown as-is, while English and Chinese speech is translated into German. It targets borderless-fullscreen games and ordinary video.
+
+- **Download**: grab `DeutschOverlay-0.1.0-win64.7z` from [Releases](https://github.com/aolingge/DeutschOverlay/releases/latest), extract the archive completely (the `models` folder next to the executable is required), then run `DeutschOverlay.exe`.
+- **Privacy**: local mode is fully offline (faster-whisper + CTranslate2) and never records or uploads audio. Online mode uses Azure Speech and is opt-in, with credentials kept in Windows Credential Manager. See [SECURITY.md](SECURITY.md).
+- **Source layout**: `src/deutsch_overlay/` (app, audio capture, engines, overlay, settings UI), `tests/` (pytest, ~200 tests, 90% coverage), `scripts/` (model preparation, EXE build, local install, QA harness). The UI is in Chinese; the setup and packaging commands are under [从源码运行与打包](#从源码运行与打包) above.
+- **Verification**: [docs/verification.md](docs/verification.md) records exactly what was tested on real hardware and what was not. It is written in Chinese and is deliberately honest about the gaps (real games, human voices, monitor hot-plug, live Azure accounts).
+- **License**: MIT for this project's source; bundled third-party components and models keep their own upstream licenses — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+Issues and pull requests are welcome. Please keep credentials and recorded audio out of reports.

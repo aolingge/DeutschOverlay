@@ -1,0 +1,24 @@
+# This repository stores every text file with LF line endings, on every platform.
+* text=auto eol=lf
+
+# Binary assets must never be converted or diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.wav binary
+*.mp3 binary
+*.mp4 binary
+*.onnx binary
+*.bin binary
+*.spm binary
+*.dll binary
+*.exe binary
+*.pyd binary
+*.7z binary
+*.zip binary
+
+# Keep generated documentation assets out of review noise.
+docs/assets/** linguist-documentation

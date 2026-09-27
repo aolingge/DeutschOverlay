@@ -60,7 +60,7 @@
 
 **Files:** `tests/test_video_playback.py`, `docs/verification.md`.
 
-- [x] Record current default/output device and simultaneous FFplay test-tone loopback evidence; current default xiaodu peak 0.0083, other endpoints zero.
+- [x] Record current default/output device and simultaneous FFplay test-tone loopback evidence; current default device peak 0.0083, other endpoints zero.
 - [x] Play synthetic German, English and Chinese MP4 clips through Windows; current 3/3 pass, model inference 0.22–0.27 seconds per clip.
 - [x] Verify the real Windows overlay displays a German-only and a bilingual caption and record any limitations of full-screen games or protected/exclusive audio.
 - [x] Document what was actually tested, including source audio quality and total latency limits.
