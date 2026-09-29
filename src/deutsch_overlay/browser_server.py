@@ -119,6 +119,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -259,6 +260,36 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(404, ErrorCode.NOT_FOUND, f"no route for GET {path}")
         except ProtocolError as exc:
             self._fail(exc)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib naming
+        """Answer the CORS preflight an extension's JSON POST always triggers.
+
+        A request with a JSON content type and an ``Authorization`` header is
+        never a simple request, so the browser sends ``OPTIONS`` first. The
+        guard still runs: a page cannot use this bridge just because it can
+        reach the port.
+        """
+        if not self._guard(token_required=False):
+            return
+        if not self._origin_allowed():
+            self._send_error_json(403, ErrorCode.FORBIDDEN_ORIGIN, "Origin must be a browser extension")
+            return
+        self.send_response(204)
+        self._send_cors_headers()
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Headers", "Authorization, Content-Type"
+        )
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send_cors_headers(self) -> None:
+        # Echo only an origin the guard would accept anyway: a refused page must
+        # not receive the one header its browser needs to read the refusal.
+        origin = self.headers.get("Origin", "")
+        if origin and urlparse(origin).scheme.lower() in LOOPBACK_ORIGIN_SCHEMES:
+            self.send_header("Access-Control-Allow-Origin", origin)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib naming
         path = urlparse(self.path).path.rstrip("/") or "/"

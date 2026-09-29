@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import math
 import socket
@@ -775,6 +776,51 @@ def test_page_origin_that_is_not_an_extension_is_rejected(bridge):
         f"{bridge.url}/v1/health", headers={"Origin": "chrome-extension://abcdefghijklmnop"}
     )
     assert status == 200
+
+
+def test_extension_origin_gets_cors_headers_on_real_responses(bridge):
+    """A JSON POST with an Authorization header is never a simple request."""
+    request = urllib.request.Request(f"{bridge.url}/v1/health", method="GET")
+    request.add_header("Origin", "chrome-extension://abcdefghijklmnop")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200
+        assert (
+            response.headers.get("Access-Control-Allow-Origin")
+            == "chrome-extension://abcdefghijklmnop"
+        )
+    # No Origin (a plain loopback client like curl) gets no CORS header at all.
+    with urllib.request.urlopen(f"{bridge.url}/v1/health", timeout=10) as response:
+        assert response.headers.get("Access-Control-Allow-Origin") is None
+
+
+def test_preflight_is_answered_for_an_extension_but_not_for_a_page(bridge):
+    def preflight(origin):
+        parts = bridge.url.split("://", 1)[1]
+        host, port = parts.split(":", 1)
+        connection = http.client.HTTPConnection(host, int(port), timeout=10)
+        try:
+            connection.request(
+                "OPTIONS",
+                "/v1/session",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "authorization,content-type",
+                },
+            )
+            return connection.getresponse()
+        finally:
+            connection.close()
+
+    response = preflight("chrome-extension://abcdefghijklmnop")
+    assert response.status == 204
+    assert response.getheader("Access-Control-Allow-Origin") == "chrome-extension://abcdefghijklmnop"
+    assert "POST" in response.getheader("Access-Control-Allow-Methods")
+    assert "Authorization" in response.getheader("Access-Control-Allow-Headers")
+    # A preflight needs no token, but a web page still cannot unlock the bridge.
+    response = preflight("https://evil.example.com")
+    assert response.status == 403
+    assert response.getheader("Access-Control-Allow-Origin") is None
 
 
 def test_full_http_round_trip_produces_timed_captions(bridge):
