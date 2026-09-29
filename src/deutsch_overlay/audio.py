@@ -369,3 +369,127 @@ class SpeechSegmenter:
         self._fresh_voice_frames = 0
         self._quiet_frames = 0
         return clip
+
+
+@dataclass(frozen=True, slots=True)
+class SpeechSpan:
+    """A bounded utterance with the exact audio it covers.
+
+    ``start_sample``/``end_sample`` are absolute positions in the stream fed to
+    the segmenter, running half-open as ``[start, end)``. They are what makes a
+    caption timesynced to the video: the recognizer's own segment times are
+    relative to the clip, and adding ``start_sample`` places them on the media
+    timeline. ``overlap`` says the clip shares audio with the previous one
+    because it was cut on length rather than on silence, so a consumer can
+    treat its leading words as a correction instead of new speech.
+    """
+
+    samples: np.ndarray
+    start_sample: int
+    end_sample: int
+    overlap: bool = False
+    forced_cut: bool = False
+
+    @property
+    def duration_samples(self) -> int:
+        return self.end_sample - self.start_sample
+
+
+class PositionedSpeechSegmenter(SpeechSegmenter):
+    """``SpeechSegmenter`` that also reports where each clip came from.
+
+    The base class is intentionally left byte-for-byte identical: live desktop
+    overlay, its tests, and its caller all depend on it. This subclass adds
+    bookkeeping only, by remembering the absolute position of every buffered
+    frame and reading those positions back when the base class emits a clip.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._positions: list[int] = []
+        self._consumed = 0
+        self._start = 0
+        self._last_end = 0
+        self._has_emitted = False
+
+    @property
+    def consumed_samples(self) -> int:
+        """Stream position of the next sample that will be pushed."""
+        return self._consumed
+
+    @property
+    def utterance_start_sample(self) -> int:
+        """Stream position of the first sample of the current utterance."""
+        return self._start
+
+    @property
+    def buffered_samples(self) -> int:
+        """Audio the segmenter is holding: the current utterance plus preroll."""
+        return len(self._positions) * self.frame_samples
+
+    def reset(self) -> None:
+        """Discard the current utterance and restart position accounting."""
+        super().flush()
+        self._positions = []
+        self._consumed = 0
+        self._start = 0
+        self._last_end = 0
+        self._has_emitted = False
+
+    def push_positioned(self, frame: np.ndarray) -> list[SpeechSpan]:
+        frame = np.asarray(frame, dtype=np.float32).reshape(-1)
+        if frame.size != self.frame_samples:
+            raise ValueError("frame must be a fixed-size mono array")
+        base = self._consumed
+        self._consumed += frame.size
+        # ``self._frames`` can grow by more than one entry here (the base class
+        # pulls preroll frames in when speech starts), so mirror the positions of
+        # everything it holds before asking it to cut.
+        self._positions = [
+            base - (len(self._frames) - index) * self.frame_samples
+            for index in range(len(self._frames))
+        ]
+        clips = self.push(frame)
+        self._positions.append(base)
+        spans: list[SpeechSpan] = []
+        for clip in clips:
+            # The base class keeps an overlap tail after a forced cut, so the
+            # clip no longer starts at the oldest buffered frame - read that
+            # frame's own position instead of reusing the first one forever.
+            start = self._positions[0]
+            remaining = len(self._positions) - len(self._frames)
+            self._positions = self._positions[remaining:] if (self._frames and remaining > 0) else []
+            self._start = start
+            end = base + frame.size
+            spans.append(
+                SpeechSpan(
+                    samples=clip,
+                    start_sample=start,
+                    end_sample=end,
+                    overlap=start < self._last_end and self._has_emitted,
+                    forced_cut=True,
+                )
+            )
+            self._last_end = end
+            self._has_emitted = True
+        return spans
+
+    def flush_positioned(self) -> SpeechSpan | None:
+        clip = self.flush()
+        start = self._positions[0] if self._positions else self._start
+        self._positions = []
+        self._start = self._consumed
+        if clip is None:
+            return None
+        end = start + int(clip.size)
+        span = SpeechSpan(
+            samples=clip,
+            start_sample=start,
+            end_sample=end,
+            overlap=start < self._last_end and self._has_emitted,
+            forced_cut=False,
+        )
+        self._last_end = end
+        self._has_emitted = True
+        return span
+

@@ -72,6 +72,7 @@ dev = [
 
 [project.scripts]
 deutsch-overlay = "deutsch_overlay.app:main"
+deutsch-overlay-bridge = "deutsch_overlay.browser_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
