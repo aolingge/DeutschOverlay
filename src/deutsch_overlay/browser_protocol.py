@@ -524,6 +524,7 @@ class SegmentView:
     translation_failed: bool = False
     provisional: bool = False
     timeline_epoch: int = 0
+    raw_original: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -531,6 +532,7 @@ class SegmentView:
             "revision": self.revision,
             "sourceLanguage": self.source_language,
             "original": self.original,
+            "rawOriginal": self.raw_original or self.original,
             "german": self.german,
             "startMs": self.start_ms,
             "endMs": self.end_ms,

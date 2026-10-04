@@ -20,6 +20,7 @@ if (-not $NoBuild) {
         '--name', 'DeutschOverlay', '--paths', (Join-Path $projectRoot 'src'),
         '--version-file', (Join-Path $PSScriptRoot 'version_info.txt'),
         '--collect-data', 'faster_whisper',
+        '--collect-all', 'opencc',
         '--collect-submodules', 'transformers.models.marian',
         '--collect-all', 'azure.cognitiveservices.speech',
         '--collect-all', 'nvidia.cudnn',

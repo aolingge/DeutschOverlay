@@ -18,6 +18,8 @@ from faster_whisper import WhisperModel
 
 from deutsch_overlay.models import ModelStore
 from deutsch_overlay.pcm import Resampler
+from deutsch_overlay.engines.local import LocalEngine
+from deutsch_overlay.gpu_runtime import prepare_cuda_dlls
 
 
 def units(text, language):
@@ -51,19 +53,33 @@ def load_audio(path, rate):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
-    parser.add_argument("--baseline-pcm", type=Path, required=True)
+    parser.add_argument("--baseline-pcm", type=Path, help="Optional historical resampler for a before/after comparison")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--after-beam", type=int, choices=(3, 5), default=3)
+    parser.add_argument("--model-path", type=Path, help="Existing local CTranslate2 Whisper model; never downloaded")
+    parser.add_argument("--chinese-script", choices=("raw", "simplified", "traditional"), default="raw")
+    parser.add_argument("--hotwords-file", type=Path)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
-    spec = importlib.util.spec_from_file_location("deutsch_overlay.baseline_pcm", args.baseline_pcm)
-    baseline = importlib.util.module_from_spec(spec)
-    import sys
-    sys.modules[spec.name] = baseline
-    spec.loader.exec_module(baseline)
-    model_path = ModelStore().require("whisper-small")
-    model = WhisperModel(str(model_path), device="cpu", compute_type="int8", cpu_threads=4)
-    report = {"model": str(model_path), "device": "cpu", "compute_type": "int8", "cases": [],
-              "baseline_sha256": hashlib.sha256(args.baseline_pcm.read_bytes()).hexdigest(),
+    baseline = None
+    if args.baseline_pcm:
+        spec = importlib.util.spec_from_file_location("deutsch_overlay.baseline_pcm", args.baseline_pcm)
+        baseline = importlib.util.module_from_spec(spec)
+        import sys
+        sys.modules[spec.name] = baseline
+        spec.loader.exec_module(baseline)
+    terms = json.loads(args.hotwords_file.read_text(encoding="utf-8-sig")) if args.hotwords_file else {}
+    engine = LocalEngine(asr_model_path=args.model_path, chinese_script=args.chinese_script, hotwords=terms)
+    model_path = engine.asr_model_path or ModelStore().require("whisper-small")
+    if args.device == "cuda":
+        prepare_cuda_dlls()
+    compute_type = "int8_float16" if args.device == "cuda" else "int8"
+    model = WhisperModel(str(model_path), device=args.device, compute_type=compute_type, cpu_threads=4)
+    engine.asr = model
+    report = {"model": str(model_path), "device": args.device, "compute_type": compute_type, "cases": [],
+              "baseline_sha256": hashlib.sha256(args.baseline_pcm.read_bytes()).hexdigest() if args.baseline_pcm else None,
+              "chinese_script": args.chinese_script,
+              "hotwords_enabled": bool(terms),
               "current_sha256": hashlib.sha256(Path(__import__('deutsch_overlay.pcm', fromlist=['']).__file__).read_bytes()).hexdigest(),
               "limitations": ["Supplied fixtures only; no claim of real-world WER.",
                                "Combined pipeline comparison; beam and resampling effects are not isolated.",
@@ -72,21 +88,39 @@ def main():
     for case in json.loads(args.manifest.read_text(encoding="utf-8-sig"))["cases"]:
         for rate in (44100, 48000):
             audio = load_audio(case["audio"], rate)
-            for name, cls, beam, words in (("before", baseline.Resampler, 3, False), ("after", Resampler, args.after_beam, True)):
+            pipelines = [("after", Resampler, args.after_beam, True)]
+            if baseline:
+                pipelines.insert(0, ("before", baseline.Resampler, 3, False))
+            for name, cls, beam, words in pipelines:
                 converter = cls(rate)
                 chunks = [converter.process(audio[i:i+rate//10]) for i in range(0, len(audio), rate//10)]
                 chunks.append(converter.flush())
                 signal = np.concatenate(chunks)
                 start = time.perf_counter()
-                segments, info = model.transcribe(signal, language=case["language"], beam_size=beam,
-                    condition_on_previous_text=False, word_timestamps=words, vad_filter=True,
-                    hallucination_silence_threshold=1.0 if words else None)
-                decoded = list(segments)
-                text = " ".join(s.text.strip() for s in decoded)
+                if name == "after":
+                    result = engine.transcribe_segments(signal, language=case["language"], beam_size=beam,
+                                                        word_timestamps=words, offset_samples=0)
+                    decoded = result.segments
+                    text = result.text
+                    raw_text = " ".join(s.raw_text or s.text for s in decoded)
+                else:
+                    segments, info = model.transcribe(signal, language=case["language"], beam_size=beam,
+                        condition_on_previous_text=False, word_timestamps=words, vad_filter=True,
+                        hallucination_silence_threshold=1.0 if words else None)
+                    decoded = list(segments)
+                    text = raw_text = " ".join(s.text.strip() for s in decoded)
                 ref, hyp = units(case["reference"], case["language"]), units(text, case["language"])
+                equivalent_ref, equivalent_hyp = ref, hyp
+                if case["language"] == "zh" and args.chinese_script != "raw":
+                    equivalent_ref = units(engine._normalize_chinese(case["reference"]), "zh")
+                    equivalent_hyp = units(engine._normalize_chinese(raw_text), "zh")
                 item = {"id": case["id"], "kind": case.get("kind"), "language": case["language"],
                         "input_rate": rate, "pipeline": name, "beam": beam,
                         "word_timestamps": words, "reference": case["reference"], "hypothesis": text,
+                        "raw_hypothesis": raw_text,
+                        "raw_edit_distance": distance(ref, units(raw_text, case["language"])),
+                        "script_equivalent_edit_distance": distance(equivalent_ref, equivalent_hyp),
+                        "script_equivalent_reference_units": len(equivalent_ref),
                         "metric": "CER" if case["language"] == "zh" else "WER",
                         "edit_distance": distance(ref, hyp), "reference_units": len(ref),
                         "error_rate": distance(ref, hyp) / max(1, len(ref)),

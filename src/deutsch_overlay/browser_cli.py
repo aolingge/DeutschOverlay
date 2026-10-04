@@ -24,6 +24,13 @@ from .engines.local import LocalEngine
 from .transcript import TranscriptResult
 
 
+def build_speech_segmenter(**options):
+    from .audio import PositionedSpeechSegmenter, SileroSpeechDetector
+
+    detector = SileroSpeechDetector(sample_rate=options["sample_rate"], frame_samples=options["frame_samples"])
+    return PositionedSpeechSegmenter(**options, voice_detector=detector)
+
+
 def default_state_dir() -> Path:
     override = os.environ.get("DEUTSCH_OVERLAY_STATE")
     if override:
@@ -123,6 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", default="", help="JSON 输出路径")
     parser.add_argument("--no-gpu", action="store_true", help="只用 CPU 识别")
     parser.add_argument("--no-prepare", action="store_true", help="不在启动时预热模型")
+    parser.add_argument("--asr-model-path", type=Path, help="已准备好的本地 CTranslate2 Whisper 模型目录；不会下载")
+    parser.add_argument("--chinese-script", choices=("simplified", "traditional", "raw"), default="simplified",
+                        help="中文识别字形：默认简体；JSON 同时保留原始识别文本")
+    parser.add_argument("--hotwords-file", type=Path, help="本地 JSON 术语表，键为 de/en/zh；每种语言最多 1000 字符")
+    parser.add_argument("--speech-gate", choices=("silero", "energy"), default="silero",
+                        help="实时分句检测：默认 Silero；energy 用于兼容性比较")
     return parser
 
 
@@ -130,7 +143,16 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     token_path = Path(args.token_file) if args.token_file else default_token_path()
     handshake_path = Path(args.handshake) if args.handshake else default_handshake_path()
-    engine = LocalEngine(prefer_gpu=not args.no_gpu)
+    try:
+        hotwords = json.loads(args.hotwords_file.read_text(encoding="utf-8-sig")) if args.hotwords_file else {}
+        if not isinstance(hotwords, dict):
+            raise ValueError("术语表必须是 JSON 对象")
+        engine = LocalEngine(prefer_gpu=not args.no_gpu, asr_model_path=args.asr_model_path,
+                             chinese_script=args.chinese_script, hotwords=hotwords)
+    except (OSError, ValueError) as exc:
+        # Terms may be private. Do not echo file contents or JSON error context.
+        print(f"识别配置无效（{type(exc).__name__}）；请检查模型目录和术语表格式", file=sys.stderr)
+        return 2
 
     if args.print_token:
         config = BridgeServerConfig(token=args.token, token_path=token_path)
@@ -165,7 +187,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    service = AsrBridgeService(engine, max_sessions=args.max_sessions)
+    service = AsrBridgeService(engine, max_sessions=args.max_sessions,
+                              segmenter_factory=build_speech_segmenter if args.speech_gate == "silero" else None)
     if not args.no_prepare:
         service.prepare(blocking=True)
     config = BridgeServerConfig(

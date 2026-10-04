@@ -89,6 +89,7 @@ class TranscriptSegment:
     words: tuple[TranscriptWord, ...] = ()
     no_speech_probability: float | None = None
     avg_logprob: float | None = None
+    raw_text: str = ""
 
     @property
     def has_model_words(self) -> bool:
@@ -105,6 +106,7 @@ class TranscriptSegment:
             "words": [word.to_dict() for word in self.words],
             "noSpeechProbability": self.no_speech_probability,
             "avgLogprob": self.avg_logprob,
+            "rawText": self.raw_text or self.text,
         }
 
     @classmethod
@@ -124,6 +126,7 @@ class TranscriptSegment:
             words=tuple(TranscriptWord.from_dict(word) for word in words),
             no_speech_probability=_as_optional_float(data.get("noSpeechProbability")),
             avg_logprob=_as_optional_float(data.get("avgLogprob")),
+            raw_text=_as_text(data.get("rawText")),
         )
 
 

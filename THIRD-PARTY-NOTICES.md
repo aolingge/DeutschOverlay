@@ -32,6 +32,8 @@ licenses. Versions are the ones actually frozen into the release package.
 
 ## 模型
 
+源码浏览器桥新增 [OpenCC](https://github.com/BYVoid/OpenCC)（本轮安装 1.4.2，Apache-2.0）用于本地简繁转换，词典与运行库遵循上游许可。上表仍描述旧的冻结发行包，本轮未重建或替换该 EXE。后续重新打包已添加 `--collect-all opencc`；再分发须保留 OpenCC 许可及相应第三方许可。
+
 模型来源、上游仓库、转换时提交与许可见 [MODEL_SOURCES.md](MODEL_SOURCES.md)。摘要：Whisper small（MIT）、OPUS-MT en→de（CC BY 4.0，作者 Jörg Tiedemann、Santhosh Thotalingal）、OPUS-MT zh→de（Apache-2.0）。
 
 ## 关于 LGPL（Qt / PySide6）

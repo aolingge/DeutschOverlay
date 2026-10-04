@@ -50,6 +50,7 @@ Documentation = "https://github.com/aolingge/DeutschOverlay/tree/main/docs"
 
 [project.optional-dependencies]
 local = [
+  "opencc>=1.4.2,<2",
   "faster-whisper>=1.2,<2",
   "ctranslate2>=4.5,<5",
   "transformers>=5.10,<6",

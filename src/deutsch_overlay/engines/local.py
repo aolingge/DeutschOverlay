@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -63,12 +64,30 @@ class LocalEngine:
         model_store: ModelStore | None = None,
         asr_factory=None,
         prefer_gpu: bool = True,
+        asr_model_path: Path | None = None,
+        chinese_script: str = "raw",
+        hotwords: dict[str, str] | None = None,
     ) -> None:
         self.asr = asr
         self.translators = dict(translators or {})
         self.store = model_store or ModelStore()
         self.asr_factory = asr_factory or _whisper_factory
         self.prefer_gpu = prefer_gpu
+        self.asr_model_path = Path(asr_model_path).expanduser().resolve() if asr_model_path else None
+        if self.asr_model_path is not None:
+            missing = [name for name in ("model.bin", "config.json", "tokenizer.json")
+                       if not (self.asr_model_path / name).is_file()]
+            if missing:
+                raise ValueError(f"本地 Whisper 模型不完整（{', '.join(missing)}）；不会自动下载")
+        if chinese_script not in ("raw", "simplified", "traditional"):
+            raise ValueError("unsupported Chinese script")
+        self.chinese_script = chinese_script
+        self.hotwords = dict(hotwords or {})
+        for lang, text in self.hotwords.items():
+            if (lang not in SUPPORTED_LANGUAGES or not isinstance(text, str) or len(text) > 1000
+                    or any(ord(char) < 32 for char in text)):
+                raise ValueError("术语表仅支持 de/en/zh，每种语言最多 1000 字符且不能含控制字符")
+        self._chinese_converter = None
         self.warning: str | None = None
         self._warmed = False
         self._using_gpu = False
@@ -90,7 +109,7 @@ class LocalEngine:
 
     def _get_asr(self):
         if self.asr is None:
-            path = self.store.require("whisper-small")
+            path = self.asr_model_path or self.store.require("whisper-small")
             if self.prefer_gpu:
                 try:
                     prepare_cuda_dlls()
@@ -171,6 +190,7 @@ class LocalEngine:
             condition_on_previous_text=False,
             word_timestamps=word_timestamps,
             hallucination_silence_threshold=1.0 if word_timestamps else None,
+            hotwords=self.hotwords.get(language) or None,
         )
         detected = language or getattr(info, "language", "") or ""
         offset = offset_samples
@@ -179,6 +199,9 @@ class LocalEngine:
         converted: list[TranscriptSegment] = []
         for segment in segments:
             text = (getattr(segment, "text", "") or "").strip()
+            raw_text = text
+            if detected == "zh":
+                text = self._normalize_chinese(text)
             if not text:
                 continue
             start = _optional_number(getattr(segment, "start", 0.0))
@@ -187,6 +210,13 @@ class LocalEngine:
                 continue
             start_ms = int(round(start * 1000))
             end_ms = int(round(min(end, prepared.size / SAMPLE_RATE) * 1000))
+            words = self._convert_words(segment, offset, start_ms, end_ms) if word_timestamps else ()
+            if detected == "zh" and self.chinese_script != "raw":
+                words = tuple(replace(word, text=self._normalize_chinese(word.text)) for word in words)
+                # Phrase conversion can cross model word boundaries. Keep timings
+                # only when the converted words still cover the converted text.
+                if "".join("".join(word.text.split()) for word in words) != "".join(text.split()):
+                    words = ()
             converted.append(
                 TranscriptSegment(
                     text=text,
@@ -199,11 +229,8 @@ class LocalEngine:
                     end_sample=(None if offset is None else offset + min(
                         prepared.size, max(0, round(end_ms * SAMPLE_RATE / 1000))
                     )),
-                    words=(
-                        self._convert_words(segment, offset, start_ms, end_ms)
-                        if word_timestamps
-                        else ()
-                    ),
+                    words=words,
+                    raw_text=raw_text,
                     no_speech_probability=_optional_number(
                         getattr(segment, "no_speech_prob", None)
                     ),
@@ -220,6 +247,15 @@ class LocalEngine:
             warning=self.warning,
             device="cuda" if self._using_gpu else "cpu",
         )
+
+    def _normalize_chinese(self, text: str) -> str:
+        if self.chinese_script == "raw" or not text:
+            return text
+        if self._chinese_converter is None:
+            from opencc import OpenCC
+
+            self._chinese_converter = OpenCC("t2s.json" if self.chinese_script == "simplified" else "s2t.json")
+        return self._chinese_converter.convert(text)
 
     def transcribe_audio(
         self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE
