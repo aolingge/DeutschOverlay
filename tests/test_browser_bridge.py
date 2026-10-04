@@ -475,6 +475,42 @@ def test_captions_present_never_starts_recognition():
     assert caught.value.code == ErrorCode.CAPTIONS_PRESENT
 
 
+def test_idle_session_ttl_reaps_only_unbusy_sessions(monkeypatch):
+    service = make_service(session_idle_ttl_seconds=10)
+    response = service.create_session(SessionRequest.from_dict(new_session_payload()))
+    session = service.get(response.session_id)
+    now = time.monotonic()
+    monkeypatch.setattr("deutsch_overlay.browser_bridge._now", lambda: now + 11)
+    assert service.health()["sessions"] == 0
+    assert session.stopped is True
+    with pytest.raises(ProtocolError) as caught:
+        service.get(response.session_id)
+    assert caught.value.code == ErrorCode.NOT_FOUND
+
+
+def test_idle_session_ttl_does_not_reap_busy_session(monkeypatch):
+    service = make_service(session_idle_ttl_seconds=10)
+    response = service.create_session(SessionRequest.from_dict(new_session_payload()))
+    session = service.get(response.session_id)
+    session.busy = True
+    session.last_touch = time.monotonic()
+    monkeypatch.setattr("deutsch_overlay.browser_bridge._now", lambda: session.last_touch + 11)
+    assert service.health()["sessions"] == 1
+    assert session.stopped is False
+    service.close_session(session.session_id)
+
+
+def test_session_max_age_reaps_even_when_recently_touched(monkeypatch):
+    service = make_service(session_idle_ttl_seconds=1000, session_max_seconds=20)
+    response = service.create_session(SessionRequest.from_dict(new_session_payload()))
+    session = service.get(response.session_id)
+    session.touch()
+    now = session.created_at + 21
+    monkeypatch.setattr("deutsch_overlay.browser_bridge._now", lambda: now)
+    assert service.health()["sessions"] == 0
+    assert session.stopped is True
+
+
 def test_unknown_caption_state_is_treated_as_having_captions():
     service = make_service()
     response = service.create_session(

@@ -49,6 +49,7 @@ from .browser_protocol import (
     TranscriptQuery,
     TranscriptResponse,
     PROTOCOL_VERSION,
+    MAX_SESSION_SECONDS,
     SUPPORTED_TRANSLATION_TARGETS,
 )
 from .pcm import (
@@ -62,6 +63,7 @@ from .transcript import TranscriptResult, TranscriptSegment, TranscriptTranslati
 
 GAP_TOLERANCE_SECONDS = 0.5
 MAX_SNAPSHOT_REVISIONS = 64
+DEFAULT_SESSION_IDLE_TTL_SECONDS = 2 * 60 * 60
 
 
 def _now() -> float:
@@ -260,6 +262,8 @@ class AsrBridgeService:
         model_profile: str = "small",
         max_clip_jobs: int = 8,
         max_translation_jobs: int = 32,
+        session_idle_ttl_seconds: float = DEFAULT_SESSION_IDLE_TTL_SECONDS,
+        session_max_seconds: float = MAX_SESSION_SECONDS,
     ) -> None:
         self.engine = engine
         self.token = token or new_token()
@@ -280,6 +284,12 @@ class AsrBridgeService:
         self.translation_context = False
         self.max_clip_jobs = max(1, max_clip_jobs)
         self.max_translation_jobs = max(1, max_translation_jobs)
+        if not isinstance(session_idle_ttl_seconds, (int, float)) or session_idle_ttl_seconds <= 0:
+            raise ValueError("session_idle_ttl_seconds must be positive")
+        if not isinstance(session_max_seconds, (int, float)) or session_max_seconds <= 0:
+            raise ValueError("session_max_seconds must be positive")
+        self.session_idle_ttl_seconds = float(session_idle_ttl_seconds)
+        self.session_max_seconds = float(session_max_seconds)
 
     def settings(self) -> dict[str, Any]:
         with self._config_lock:
@@ -344,6 +354,7 @@ class AsrBridgeService:
         return getattr(self.engine, "name", "") or type(self.engine).__name__
 
     def health(self) -> dict[str, Any]:
+        self._reap_expired_sessions()
         with self._lock:
             sessions = len(self.sessions)
         return {
@@ -376,6 +387,7 @@ class AsrBridgeService:
             return self._create_session(request)
 
     def _create_session(self, request: SessionRequest) -> SessionResponse:
+        self._reap_expired_sessions()
         if request.translation_target not in SUPPORTED_TRANSLATION_TARGETS:
             raise ProtocolError(ErrorCode.LANGUAGE_UNSUPPORTED,
                 f"translation target is not supported: {request.translation_target}")
@@ -454,11 +466,38 @@ class AsrBridgeService:
         }.get(reason, reason)
 
     def get(self, session_id: str) -> BridgeSession:
+        self._reap_expired_sessions()
         with self._lock:
             session = self.sessions.get(session_id)
         if session is None:
             raise ProtocolError(ErrorCode.NOT_FOUND, f"unknown session: {session_id}")
         return session
+
+    def _reap_expired_sessions(self) -> int:
+        """Stop only idle sessions whose client stopped touching the bridge.
+
+        The monotonic timestamp is deliberately kept on the session, so wall
+        clock changes cannot prolong a leaked tab session or expire an active
+        one. Busy inference is allowed to finish and is reaped on its next
+        idle check.
+        """
+        now = _now()
+        expired: list[BridgeSession] = []
+        with self._lock:
+            for session_id, session in list(self.sessions.items()):
+                if session.stopped or session.busy or session.translation_busy:
+                    continue
+                idle_for = now - session.last_touch
+                age = now - session.created_at
+                if idle_for < self.session_idle_ttl_seconds and age < self.session_max_seconds:
+                    continue
+                self.sessions.pop(session_id, None)
+                expired.append(session)
+            if expired:
+                self.status.sessions = dict(self.sessions)
+        for session in expired:
+            self._stop_worker(session)
+        return len(expired)
 
     def close_session(self, session_id: str) -> int:
         session = self.get(session_id)
