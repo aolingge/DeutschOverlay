@@ -34,6 +34,7 @@ MAX_PACKETS_PER_REQUEST = 16
 MAX_LEAD_SECONDS = 30.0
 
 SUPPORTED_LANGUAGES = ("de", "en", "zh")
+SUPPORTED_TRANSLATION_TARGETS = ("de",)
 SUPPORTED_ENCODINGS = ("pcm_s16le",)
 SUPPORTED_SOURCE_KINDS = ("tab_capture", "local_file")
 
@@ -185,6 +186,7 @@ class SessionRequest:
     caption_availability: str
     source_kind: str = SourceKind.TAB_CAPTURE
     source_language: str = "auto"
+    translation_target: str = "de"
     # ``None`` means the page did not declare an epoch at all, which is not the
     # same claim as declaring epoch 0: the first keeps the stream's identity
     # unknown, the second starts a numbered one.
@@ -210,6 +212,7 @@ class SessionRequest:
             "captionAvailability": self.caption_availability,
             "sourceKind": self.source_kind,
             "sourceLanguage": self.source_language,
+            "translationTarget": self.translation_target,
             "timelineEpoch": self.timeline_epoch,
             "audioStartMs": self.audio_start_ms,
             "playbackRate": self.playback_rate,
@@ -269,6 +272,8 @@ class SessionRequest:
             caption_availability=availability,
             source_kind=source_kind,
             source_language=_optional_language(data, "sourceLanguage"),
+            translation_target=(lambda value: "de" if value == "auto" else value)(
+                _optional_language(data, "translationTarget")),
             timeline_epoch=_require_int(data, "timelineEpoch", minimum=0)
             if "timelineEpoch" in data
             else None,

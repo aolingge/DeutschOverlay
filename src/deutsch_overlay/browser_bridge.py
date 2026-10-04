@@ -49,6 +49,7 @@ from .browser_protocol import (
     TranscriptQuery,
     TranscriptResponse,
     PROTOCOL_VERSION,
+    SUPPORTED_TRANSLATION_TARGETS,
 )
 from .pcm import (
     AudioTimeline,
@@ -375,6 +376,9 @@ class AsrBridgeService:
             return self._create_session(request)
 
     def _create_session(self, request: SessionRequest) -> SessionResponse:
+        if request.translation_target not in SUPPORTED_TRANSLATION_TARGETS:
+            raise ProtocolError(ErrorCode.LANGUAGE_UNSUPPORTED,
+                f"translation target is not supported: {request.translation_target}")
         availability = request.caption_availability
         if availability == CaptionAvailability.PRESENT:
             recognize, reason = False, "captions_present"

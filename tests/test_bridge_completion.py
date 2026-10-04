@@ -52,7 +52,7 @@ class Engine:
 
 def request(**kwargs):
     return SessionRequest(platform="youtube", video_key="fixture", caption_availability="absent",
-        source_language="en", audio_start_ms=0, timeline_epoch=0, **kwargs)
+        source_language="en", translation_target="de", audio_start_ms=0, timeline_epoch=0, **kwargs)
 
 
 @pytest.fixture

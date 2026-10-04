@@ -407,6 +407,14 @@ def test_translate_keeps_original_text_when_the_model_fails():
     assert "翻译失败" in engine.warning
 
 
+def test_session_rejects_unsupported_translation_target_before_audio():
+    service = make_service()
+    payload = new_session_payload(sourceLanguage="en", translationTarget="zh")
+    with pytest.raises(ProtocolError) as error:
+        service.create_session(SessionRequest.from_dict(payload))
+    assert error.value.code == "language_unsupported"
+
+
 def test_translate_marks_de_as_identity_not_failure():
     engine = make_engine()
     translation = engine.translate("Guten Tag", "de")
