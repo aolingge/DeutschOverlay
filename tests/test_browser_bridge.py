@@ -194,8 +194,8 @@ def settle(service, session, timeout=10.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with session.job_lock:
-            pending = len(session.jobs)
-        if pending == 0 and not session.busy:
+            pending = len(session.jobs) + len(session.translation_jobs)
+        if pending == 0 and not session.busy and not session.translation_busy:
             return True
         time.sleep(0.02)
     return False

@@ -525,6 +525,12 @@ class SegmentView:
     provisional: bool = False
     timeline_epoch: int = 0
     raw_original: str = ""
+    avg_logprob: float | None = None
+    no_speech_probability: float | None = None
+    uncertain: bool = True
+    uncertainty_reasons: tuple[str, ...] = ("scores_unavailable",)
+    translation_group_ids: tuple[str, ...] = ()
+    removed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -533,6 +539,12 @@ class SegmentView:
             "sourceLanguage": self.source_language,
             "original": self.original,
             "rawOriginal": self.raw_original or self.original,
+            "avgLogprob": self.avg_logprob,
+            "noSpeechProbability": self.no_speech_probability,
+            "uncertain": self.uncertain,
+            "uncertaintyReasons": list(self.uncertainty_reasons),
+            "translationGroupIds": list(self.translation_group_ids),
+            "removed": self.removed,
             "german": self.german,
             "startMs": self.start_ms,
             "endMs": self.end_ms,
@@ -555,6 +567,8 @@ class TranscriptResponse:
     language: str
     progress_ms: int
     translation_backend: str
+    metrics: dict[str, Any] = field(default_factory=dict)
+    warning: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -565,6 +579,8 @@ class TranscriptResponse:
             "language": self.language,
             "progressMs": self.progress_ms,
             "translationBackend": self.translation_backend,
+            "metrics": self.metrics,
+            "warning": self.warning,
         }
 
 

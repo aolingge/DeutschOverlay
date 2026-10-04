@@ -41,7 +41,7 @@ from .browser_protocol import (
 DEFAULT_MAX_BODY_BYTES = 3 * 1024 * 1024
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
 LOOPBACK_ORIGIN_SCHEMES = ("chrome-extension", "moz-extension", "safari-web-extension")
-SESSION_PATH = re.compile(r"^/v1/session/([0-9a-f]{8,64})(?:/(audio|transcript|finish))?$")
+SESSION_PATH = re.compile(r"^/v1/session/([0-9a-f]{8,64})(?:/(audio|transcript|finish|retry))?$")
 
 
 @dataclass(slots=True)
@@ -199,7 +199,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            self._send_error_json(400, ErrorCode.BAD_REQUEST, f"invalid JSON body: {exc}")
+            self._send_error_json(400, ErrorCode.BAD_REQUEST, "invalid JSON body")
             return None
         if not isinstance(payload, dict):
             self._send_error_json(400, ErrorCode.BAD_REQUEST, "body must be a JSON object")
@@ -237,6 +237,11 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(200, self.bridge.service.health())
                 return
+            if path == "/v1/settings":
+                if not self._guard():
+                    return
+                self._send_json(200, self.bridge.service.settings())
+                return
             match = SESSION_PATH.match(path)
             if match and match.group(2) is None:
                 if not self._guard():
@@ -254,6 +259,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                         "status": session.status(),
                         "gapSamples": session.gap_samples,
                         "warning": session.warning,
+                        "metrics": {**session.metrics, "queuedClips": len(session.jobs), "queuedTranslations": len(session.translation_jobs)},
                     },
                 )
                 return
@@ -294,6 +300,13 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib naming
         path = urlparse(self.path).path.rstrip("/") or "/"
         try:
+            if path == "/v1/settings":
+                if not self._guard():
+                    return
+                payload = self._read_json()
+                if payload is not None:
+                    self._send_json(200, self.bridge.service.update_settings(payload))
+                return
             if path == "/v1/session":
                 if not self._guard():
                     return
@@ -317,6 +330,9 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             session = self.bridge.service.get(session_id)
+            if action == "retry":
+                self._send_json(200, self.bridge.service.retry_segment(session, payload))
+                return
             if action == "audio":
                 response = self.bridge.service.feed(session, AudioRequest.from_dict(payload))
                 self._send_json(200, response.to_dict())
@@ -336,7 +352,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         except ProtocolError as exc:
             self._fail(exc)
         except Exception as exc:  # pragma: no cover - defensive
-            self._send_error_json(500, ErrorCode.INTERNAL, f"{type(exc).__name__}: {exc}")
+            self._send_error_json(500, ErrorCode.INTERNAL, "local bridge request failed")
 
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib naming
         path = urlparse(self.path).path.rstrip("/") or "/"

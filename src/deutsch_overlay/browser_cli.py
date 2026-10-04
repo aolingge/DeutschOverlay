@@ -131,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-gpu", action="store_true", help="只用 CPU 识别")
     parser.add_argument("--no-prepare", action="store_true", help="不在启动时预热模型")
     parser.add_argument("--asr-model-path", type=Path, help="已准备好的本地 CTranslate2 Whisper 模型目录；不会下载")
+    parser.add_argument("--turbo-model-path", type=Path, help="注册额外的本地 Turbo 模型，允许在扩展中选择；不会下载")
     parser.add_argument("--chinese-script", choices=("simplified", "traditional", "raw"), default="simplified",
                         help="中文识别字形：默认简体；JSON 同时保留原始识别文本")
     parser.add_argument("--hotwords-file", type=Path, help="本地 JSON 术语表，键为 de/en/zh；每种语言最多 1000 字符")
@@ -149,6 +150,17 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("术语表必须是 JSON 对象")
         engine = LocalEngine(prefer_gpu=not args.no_gpu, asr_model_path=args.asr_model_path,
                              chinese_script=args.chinese_script, hotwords=hotwords)
+        profiles = {"small": None}
+        profile = "small"
+        if args.asr_model_path:
+            profile = "configured"
+            profiles[profile] = engine.asr_model_path
+        if args.turbo_model_path:
+            turbo = LocalEngine(asr_model_path=args.turbo_model_path)
+            profiles["turbo"] = turbo.asr_model_path
+            if engine.asr_model_path == turbo.asr_model_path:
+                profile = "turbo"
+                profiles.pop("configured", None)
     except (OSError, ValueError) as exc:
         # Terms may be private. Do not echo file contents or JSON error context.
         print(f"识别配置无效（{type(exc).__name__}）；请检查模型目录和术语表格式", file=sys.stderr)
@@ -187,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    service = AsrBridgeService(engine, max_sessions=args.max_sessions,
+    service = AsrBridgeService(engine, max_sessions=args.max_sessions, model_profiles=profiles, model_profile=profile,
                               segmenter_factory=build_speech_segmenter if args.speech_gate == "silero" else None)
     if not args.no_prepare:
         service.prepare(blocking=True)

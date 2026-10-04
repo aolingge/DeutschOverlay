@@ -25,7 +25,9 @@ import secrets
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+import re
+from collections import OrderedDict, deque
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 import numpy as np
@@ -55,7 +57,7 @@ from .pcm import (
     TimelineAnchor,
     decode_packet,
 )
-from .transcript import TranscriptResult, TranscriptSegment
+from .transcript import TranscriptResult, TranscriptSegment, TranscriptTranslation
 
 GAP_TOLERANCE_SECONDS = 0.5
 MAX_SNAPSHOT_REVISIONS = 64
@@ -84,6 +86,17 @@ class ClipJob:
     provisional: bool
     language: str
     epoch: int = 0
+    generation: int = 0
+    queued_at: float = field(default_factory=_now)
+    beam_size: int = 3
+
+
+@dataclass(slots=True)
+class TranslationJob:
+    stored: StoredSegment
+    language: str
+    generation: int
+    queued_at: float = field(default_factory=_now)
 
 
 @dataclass(slots=True)
@@ -128,6 +141,20 @@ class BridgeSession:
     wake: threading.Event = field(default_factory=threading.Event)
     stopped: bool = False
     busy: bool = False
+    generation: int = 0
+    state_lock: Any = field(default_factory=threading.RLock)
+    translation_jobs: list[TranslationJob] = field(default_factory=list)
+    translation_worker: threading.Thread | None = None
+    translation_wake: threading.Event = field(default_factory=threading.Event)
+    translation_busy: bool = False
+    translation_cache: Any = field(default_factory=OrderedDict)
+    retained_clips: Any = field(default_factory=OrderedDict)
+    segment_clips: dict[str, int] = field(default_factory=dict)
+    metrics: dict[str, int | float] = field(default_factory=lambda: {
+        "droppedClips": 0, "droppedTranslations": 0, "translationCacheHits": 0,
+        "recognitionMs": 0, "translationMs": 0, "recognitionQueueMs": 0, "translationQueueMs": 0,
+    })
+    latency_samples: dict[str, Any] = field(default_factory=dict)
     carry: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     frame_cursor: int = 0
     restart_origin: int = 0
@@ -180,6 +207,8 @@ class BridgeSession:
                 and not latest.translation_failed
             ):
                 return Status.TRANSLATING
+            if self.translation_busy or self.translation_jobs:
+                return Status.TRANSLATING
             if self.busy or self.jobs or not self.stream_complete:
                 return Status.RECOGNIZING
             return Status.READY
@@ -204,7 +233,7 @@ class BridgeSession:
             grouped: dict[str, SegmentView] = {}
             for stored in self.revisions:
                 grouped[stored.view.segment_id] = stored.view
-            return tuple(grouped.values())
+            return tuple(view for view in grouped.values() if not view.removed)
 
     def progress_ms(self) -> int:
         if self.timeline.has_anchor:
@@ -226,6 +255,10 @@ class AsrBridgeService:
         max_sessions: int = 4,
         token_path=None,
         frame_samples: int = 1600,
+        model_profiles: dict[str, Any] | None = None,
+        model_profile: str = "small",
+        max_clip_jobs: int = 8,
+        max_translation_jobs: int = 32,
     ) -> None:
         self.engine = engine
         self.token = token or new_token()
@@ -239,6 +272,69 @@ class AsrBridgeService:
         self.prepare_lock = threading.Lock()
         self.prepared = False
         self.prepare_error = ""
+        self._config_lock = threading.RLock()
+        self._retired_sessions: list[BridgeSession] = []
+        self.model_profiles = dict(model_profiles or {model_profile: getattr(engine, "asr_model_path", None)})
+        self.model_profile = model_profile
+        self.translation_context = False
+        self.max_clip_jobs = max(1, max_clip_jobs)
+        self.max_translation_jobs = max(1, max_translation_jobs)
+
+    def settings(self) -> dict[str, Any]:
+        with self._config_lock:
+            return {"ok": True, "settings": {
+                "modelProfile": self.model_profile,
+                "chineseScript": getattr(self.engine, "chinese_script", "raw"),
+                "hotwords": {lang: getattr(self.engine, "hotwords", {}).get(lang, "") for lang in ("de", "en", "zh")},
+                "translationContext": self.translation_context,
+            }, "profiles": [{"id": key, "label": {"small": "Small（轻量）", "turbo": "Turbo（高精度）", "configured": "启动时指定的模型"}.get(key, key)} for key in self.model_profiles],
+                "device": ("cuda" if getattr(self.engine, "_using_gpu", False) else "cpu") if self.prepared else "unloaded",
+                "modelReady": self.prepared, "warning": self.prepare_error or getattr(self.engine, "warning", "") or ""}
+
+    def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # Validate everything before changing anything. Browser input can select
+        # a registered profile, never a filesystem path or a model download.
+        with self._config_lock:
+            if not isinstance(payload, dict) or set(payload) - {"modelProfile", "chineseScript", "hotwords", "translationContext"}:
+                raise ProtocolError(ErrorCode.BAD_REQUEST, "unknown recognition setting")
+            current = self.settings()["settings"]
+            values = {**current, **payload}
+            profile, script, terms = values["modelProfile"], values["chineseScript"], values["hotwords"]
+            if not isinstance(profile, str) or profile not in self.model_profiles:
+                raise ProtocolError(ErrorCode.BAD_REQUEST, "modelProfile is not registered")
+            if script not in ("raw", "simplified", "traditional") or not isinstance(values["translationContext"], bool):
+                raise ProtocolError(ErrorCode.BAD_REQUEST, "invalid script or context setting")
+            if not isinstance(terms, dict) or any(
+                lang not in ("de", "en", "zh") or not isinstance(text, str) or len(text) > 1000
+                or any(ord(char) < 32 or ord(char) == 127 for char in text)
+                for lang, text in terms.items()
+            ):
+                raise ProtocolError(ErrorCode.BAD_REQUEST, "hotwords must contain de/en/zh strings, at most 1000 characters, without controls")
+            with self._lock:
+                sessions = list(self.sessions.values()) + self._retired_sessions
+                if any((s.recognize and not s.stopped) or s.busy or s.translation_busy for s in sessions):
+                    raise ProtocolError(ErrorCode.CONFLICT, "请先停止所有识别会话，再修改设置")
+                self._retired_sessions = [s for s in self._retired_sessions if s.busy or s.translation_busy]
+            if profile != self.model_profile:
+                from .engines.local import LocalEngine
+                if not isinstance(self.engine, LocalEngine):
+                    raise ProtocolError(ErrorCode.BAD_REQUEST, "engine does not support model switching")
+                try:
+                    engine = LocalEngine(model_store=self.engine.store, asr_factory=self.engine.asr_factory,
+                        translators=self.engine.translators, prefer_gpu=self.engine.prefer_gpu,
+                        asr_model_path=self.model_profiles[profile], chinese_script=script, hotwords=terms)
+                except (ValueError, OSError):
+                    raise ProtocolError(ErrorCode.BAD_REQUEST, "registered model is unavailable") from None
+                self.engine = engine
+                self.model_profile = profile
+                self.prepared = False
+                self.prepare_error = ""
+            else:
+                self.engine.chinese_script = script
+                self.engine.hotwords = dict(terms)
+                self.engine._chinese_converter = None
+            self.translation_context = values["translationContext"]
+            return self.settings()
 
     # ------------------------------------------------------------------ health
 
@@ -265,16 +361,20 @@ class AsrBridgeService:
         with self.prepare_lock:
             if self.prepared or self.prepare_error:
                 return
-            self.prepared = True
             try:
                 self.engine.prepare()
+                self.prepared = True
             except Exception as exc:  # surfaced through /v1/health instead of crashing
                 self.prepared = False
-                self.prepare_error = f"模型准备失败：{type(exc).__name__}: {exc}"
+                self.prepare_error = f"模型准备失败（{type(exc).__name__}）；请检查本机模型"
 
     # ----------------------------------------------------------------- sessions
 
     def create_session(self, request: SessionRequest) -> SessionResponse:
+        with self._config_lock:
+            return self._create_session(request)
+
+    def _create_session(self, request: SessionRequest) -> SessionResponse:
         availability = request.caption_availability
         if availability == CaptionAvailability.PRESENT:
             recognize, reason = False, "captions_present"
@@ -361,20 +461,31 @@ class AsrBridgeService:
         self._stop_worker(session)
         with self._lock:
             self.sessions.pop(session_id, None)
+            self._retired_sessions = [s for s in self._retired_sessions if s.busy or s.translation_busy]
+            self._retired_sessions.append(session)
             self.status.sessions = dict(self.sessions)
         return len(session.revisions)
 
     def close_all(self) -> None:
-        with self._lock:
-            sessions = list(self.sessions.values())
-            self.sessions.clear()
-            self.status.sessions = {}
-        for session in sessions:
-            self._stop_worker(session)
+        with self._config_lock:
+            with self._lock:
+                sessions = list(self.sessions.values()) + self._retired_sessions
+                self.sessions.clear()
+                self.status.sessions = {}
+            for session in sessions:
+                self._stop_worker(session)
+            with self._lock:
+                self._retired_sessions = [s for s in sessions if s.busy or s.translation_busy]
 
     # -------------------------------------------------------------- audio input
 
     def feed(self, session: BridgeSession, request: AudioRequest) -> AudioResponse:
+        with session.state_lock:
+            if session.stopped:
+                raise ProtocolError(ErrorCode.CONFLICT, "session is closed")
+            return self._feed(session, request)
+
+    def _feed(self, session: BridgeSession, request: AudioRequest) -> AudioResponse:
         session.touch()
         if not session.recognize:
             raise ProtocolError(
@@ -613,6 +724,11 @@ class AsrBridgeService:
         session.raw_since_restart = 0
         with session.job_lock:
             session.jobs = []
+            session.translation_jobs = []
+            session.generation += 1
+        session.translation_cache.clear()
+        session.retained_clips.clear()
+        session.segment_clips.clear()
         session.stream_complete = False
         session.language = session.request.source_language
         session.language_evidence.clear()
@@ -658,26 +774,64 @@ class AsrBridgeService:
                     provisional=provisional,
                     language=session.language,
                     epoch=session.timeline_epoch,
+                    generation=session.generation,
                 )
             )
-        session.idle.clear()
+            if len(session.jobs) > self.max_clip_jobs:
+                session.jobs.pop(0)
+                session.metrics["droppedClips"] += 1
+                session.warning = "识别处理较慢，已跳过积压的旧音频；请降低播放速度"
+            session.idle.clear()
 
     def _wake(self, session: BridgeSession) -> None:
         session.wake.set()
 
     def _stop_worker(self, session: BridgeSession) -> None:
-        session.stopped = True
+        with session.state_lock:
+            session.stopped = True
+            session.generation += 1
+            with session.job_lock:
+                session.jobs.clear()
+                session.translation_jobs.clear()
+            session.retained_clips.clear()
+            session.segment_clips.clear()
+            session.translation_cache.clear()
         session.wake.set()
-        worker = session.worker
-        if worker is not None and worker.is_alive():
-            worker.join(timeout=5.0)
+        session.translation_wake.set()
+        for worker in (session.worker, session.translation_worker):
+            if worker is not None and worker.is_alive():
+                worker.join(timeout=1.0)
 
     def _start_worker(self, session: BridgeSession) -> None:
-        session.idle.set()
+        with session.job_lock:
+            self._update_idle_locked(session)
         session.worker = threading.Thread(
             target=self._work, args=(session,), name=f"bridge-{session.session_id[:8]}", daemon=True
         )
         session.worker.start()
+        session.translation_worker = threading.Thread(
+            target=self._translation_work, args=(session,), name=f"translate-{session.session_id[:8]}", daemon=True
+        )
+        session.translation_worker.start()
+
+    @staticmethod
+    def _update_idle_locked(session: BridgeSession) -> None:
+        if not (session.busy or session.jobs or session.translation_busy or session.translation_jobs):
+            session.idle.set()
+        else:
+            session.idle.clear()
+
+    @staticmethod
+    def _job_current(session: BridgeSession, job: ClipJob | TranslationJob) -> bool:
+        epoch = job.epoch if isinstance(job, ClipJob) else job.stored.view.timeline_epoch
+        return not session.stopped and job.generation == session.generation and epoch == session.timeline_epoch
+
+    @staticmethod
+    def _record_latency(session: BridgeSession, key: str, milliseconds: float) -> None:
+        samples = session.latency_samples.setdefault(key, deque(maxlen=128))
+        samples.append(max(0, milliseconds))
+        session.metrics[key + "Ms"] = round(milliseconds)
+        session.metrics[key + "P95Ms"] = round(float(np.percentile(list(samples), 95)))
 
     def _work(self, session: BridgeSession) -> None:
         while not session.stopped:
@@ -686,22 +840,27 @@ class AsrBridgeService:
             while True:
                 with session.job_lock:
                     job = session.jobs.pop(0) if session.jobs else None
+                    session.busy = job is not None
+                    self._update_idle_locked(session)
                 if job is None:
                     break
-                if job.epoch != session.timeline_epoch:
-                    continue  # the stream was replaced while this clip waited
-                session.busy = True
                 try:
-                    self._run_job(session, job)
+                    if self._job_current(session, job):
+                        self._record_latency(session, "recognitionQueue", (_now() - job.queued_at) * 1000)
+                        started = _now()
+                        self._run_job(session, job)
+                        self._record_latency(session, "recognition", (_now() - started) * 1000)
                 except Exception as exc:  # never kill the worker over one clip
-                    session.warning = f"识别失败：{type(exc).__name__}: {exc}"
+                    if self._job_current(session, job):
+                        session.warning = f"识别失败（{type(exc).__name__}）"
                 finally:
-                    session.busy = False
-            if session.stream_complete and not session.jobs:
-                session.idle.set()
+                    with session.job_lock:
+                        session.busy = False
+                        self._update_idle_locked(session)
             if session.stopped:
                 break
-        session.idle.set()
+        with session.job_lock:
+            self._update_idle_locked(session)
 
     def _run_job(self, session: BridgeSession, job: ClipJob) -> None:
         explicit = session.request.source_language not in ("auto", "")
@@ -713,10 +872,17 @@ class AsrBridgeService:
             language=language,
             offset_samples=job.span.start_sample,
             word_timestamps=not job.provisional,
-            beam_size=3,
+            beam_size=job.beam_size,
         )
-        if job.epoch != session.timeline_epoch:
+        with session.state_lock:
+            self._complete_recognition(session, job, result)
+
+    def _complete_recognition(self, session: BridgeSession, job: ClipJob, result: TranscriptResult) -> None:
+        explicit = session.request.source_language not in ("auto", "")
+        if not self._job_current(session, job):
             return
+        if job.beam_size > 3:
+            self._remove_surplus_slots(session, job, len(result.segments))
         if not result.segments:
             return
         if result.warning:
@@ -741,6 +907,47 @@ class AsrBridgeService:
             session, result, provisional=job.provisional, epoch=job.epoch,
             clip_start_sample=job.span.start_sample,
         )
+        if not job.provisional:
+            session.retained_clips[job.span.start_sample] = job
+            session.retained_clips.move_to_end(job.span.start_sample)
+            while len(session.retained_clips) > 8 or sum(j.span.samples.size for j in session.retained_clips.values()) > 60 * RECOGNIZER_SAMPLE_RATE:
+                origin, _ = session.retained_clips.popitem(last=False)
+                session.segment_clips = {key: value for key, value in session.segment_clips.items() if value != origin}
+
+    @staticmethod
+    def _remove_surplus_slots(session: BridgeSession, job: ClipJob, count: int) -> None:
+        """A retry may split the same clip into fewer sentences, including zero."""
+        prefix = f"{session.session_id[:8]}-{job.epoch}-{job.span.start_sample}-"
+        with session.store_lock:
+            latest = {stored.view.segment_id: stored for stored in session.revisions}
+            for identifier, stored in latest.items():
+                if not identifier.startswith(prefix) or stored.view.removed:
+                    continue
+                slot = identifier[len(prefix):]
+                if not slot.isdigit() or int(slot) < count:
+                    continue
+                session.revision += 1
+                stored.view = replace(stored.view, revision=session.revision, removed=True,
+                    words=(), german="", translation_group_ids=())
+                session.segment_clips.pop(identifier, None)
+
+    def retry_segment(self, session: BridgeSession, payload: dict[str, Any]) -> dict[str, Any]:
+        with session.state_lock:
+            if not isinstance(payload.get("segmentId"), str) or type(payload.get("timelineEpoch")) is not int:
+                raise ProtocolError(ErrorCode.BAD_REQUEST, "segmentId and timelineEpoch are required")
+            if not session.recognize or session.stopped or payload["timelineEpoch"] != session.timeline_epoch:
+                raise ProtocolError(ErrorCode.CONFLICT, "该片段已过期，请重新播放")
+            origin = session.segment_clips.get(payload["segmentId"])
+            job = session.retained_clips.get(origin)
+            if job is None or not self._job_current(session, job):
+                raise ProtocolError(ErrorCode.CONFLICT, "该片段音频已过期，请重新播放")
+            with session.job_lock:
+                if len(session.jobs) >= self.max_clip_jobs:
+                    raise ProtocolError(ErrorCode.ENGINE_BUSY, "识别队列已满，请稍后重试")
+                session.jobs.append(replace(job, queued_at=_now(), beam_size=5))
+                session.idle.clear()
+            session.wake.set()
+            return {"ok": True, "queued": True, "segmentId": payload["segmentId"], "timelineEpoch": session.timeline_epoch}
 
     def _publish(
         self,
@@ -771,12 +978,23 @@ class AsrBridgeService:
             origin = start_sample if clip_start_sample is None else clip_start_sample
             stream_epoch = session.timeline_epoch if epoch is None else epoch
             identifier = f"{session.session_id[:8]}-{stream_epoch}-{origin}-{index}"
+            reasons = []
+            logprob = segment.avg_logprob if segment.avg_logprob is not None and np.isfinite(segment.avg_logprob) else None
+            no_speech = segment.no_speech_probability if segment.no_speech_probability is not None and np.isfinite(segment.no_speech_probability) else None
+            if logprob is None or no_speech is None:
+                reasons.append("scores_unavailable")
+            if logprob is not None and logprob < -1.0:
+                reasons.append("low_log_probability")
+            if no_speech is not None and no_speech > 0.6:
+                reasons.append("possible_non_speech")
             view = SegmentView(
                 segment_id=identifier,
                 revision=revision,
                 source_language=language,
                 original=segment.text,
                 raw_original=segment.raw_text or segment.text,
+                avg_logprob=logprob, no_speech_probability=no_speech,
+                uncertain=bool(reasons), uncertainty_reasons=tuple(reasons),
                 german="",
                 start_ms=start_ms,
                 end_ms=end_ms,
@@ -800,42 +1018,106 @@ class AsrBridgeService:
                 if len(session.revisions) > 4096:
                     del session.revisions[:1024]
             session.recognized_segments += 1
+            session.segment_clips[identifier] = origin
             self.status.recognized_segments += 1
             if provisional:
                 continue
-            self._translate(session, stored, language)
+            with session.job_lock:
+                session.translation_jobs.append(TranslationJob(stored, language, session.generation))
+                if len(session.translation_jobs) > self.max_translation_jobs:
+                    dropped = session.translation_jobs.pop(0)
+                    session.metrics["droppedTranslations"] += 1
+                    session.warning = "翻译处理较慢，已跳过积压译文并保留原文"
+                    self._apply_translation(session, [dropped], TranscriptTranslation(language=dropped.language, text="", backend="skipped", failed=True))
+                session.idle.clear()
+            session.translation_wake.set()
 
-    def _translate(self, session: BridgeSession, stored: StoredSegment, language: str) -> None:
-        if stored.translation_attempted:
+    def _translation_work(self, session: BridgeSession) -> None:
+        while not session.stopped:
+            session.translation_wake.wait(timeout=0.1)
+            session.translation_wake.clear()
+            while not session.stopped:
+                with session.state_lock:
+                    with session.job_lock:
+                        jobs = [session.translation_jobs.pop(0)] if session.translation_jobs else []
+                        session.translation_busy = bool(jobs)
+                        self._update_idle_locked(session)
+                if not jobs:
+                    break
+                try:
+                    first = jobs[0]
+                    if not self._job_current(session, first):
+                        continue
+                    # Give an adjacent fragment a short bounded chance to arrive.
+                    # Complete sentences, German identity and stream end never wait.
+                    if self.translation_context and first.language in ("en", "zh"):
+                        if not self._sentence_complete(first.stored.source.text) and not session.stream_complete:
+                            session.translation_wake.wait(timeout=0.25)
+                            session.translation_wake.clear()
+                        with session.job_lock:
+                            while session.translation_jobs and len(jobs) < 3:
+                                candidate = session.translation_jobs[0]
+                                prev = jobs[-1]
+                                gap = candidate.stored.view.start_ms - prev.stored.view.end_ms
+                                if (self._sentence_complete(prev.stored.source.text) or candidate.language != first.language
+                                        or candidate.generation != first.generation or not 0 <= gap <= 800
+                                        or sum(len(j.stored.source.text) for j in jobs) + len(candidate.stored.source.text) > 240):
+                                    break
+                                jobs.append(session.translation_jobs.pop(0))
+                    self._record_latency(session, "translationQueue", (_now() - first.queued_at) * 1000)
+                    source = ("" if first.language == "zh" else " ").join(j.stored.source.text.strip() for j in jobs)
+                    key = (first.language, source)
+                    started = _now()
+                    with session.state_lock:
+                        translation = session.translation_cache.get(key)
+                    if translation is not None:
+                        session.metrics["translationCacheHits"] += 1
+                    else:
+                        try:
+                            translation = self.engine.translate(source, first.language)
+                        except Exception:
+                            translation = TranscriptTranslation(language=first.language, text="", backend="failed", failed=True)
+                    self._record_latency(session, "translation", (_now() - started) * 1000)
+                    with session.state_lock:
+                        if self._job_current(session, first):
+                            if not translation.failed:
+                                session.translation_cache[key] = translation
+                                session.translation_cache.move_to_end(key)
+                                while len(session.translation_cache) > 128:
+                                    session.translation_cache.popitem(last=False)
+                            self._apply_translation(session, jobs, translation)
+                finally:
+                    with session.job_lock:
+                        session.translation_busy = False
+                        self._update_idle_locked(session)
+
+    @staticmethod
+    def _sentence_complete(text: str) -> bool:
+        return bool(re.search(r'[.!?。！？][\"\'”’）)]*$', text.strip()))
+
+    def _apply_translation(self, session: BridgeSession, jobs: list[TranslationJob], translation: TranscriptTranslation) -> None:
+        if not jobs or not self._job_current(session, jobs[0]):
             return
-        stored.translation_attempted = True
-        translation = self.engine.translate(stored.source.text, language)
         session.translation_backend = translation.backend
         if translation.failed:
             session.translation_failures += 1
             self.status.translation_failures += 1
+        group = tuple(job.stored.view.segment_id for job in jobs) if len(jobs) > 1 else ()
         with session.store_lock:
-            session.revision += 1
-            revision = session.revision
-        view = stored.view
-        stored.view = SegmentView(
-            segment_id=view.segment_id,
-            revision=revision,
-            source_language=view.source_language,
-            original=view.original,
-            raw_original=view.raw_original,
-            german=translation.text or view.original,
-            start_ms=view.start_ms,
-            end_ms=view.end_ms,
-            start_sample=view.start_sample,
-            end_sample=view.end_sample,
-            words=view.words,
-            translation_language=translation.language,
-            translation_backend=translation.backend,
-            translation_failed=translation.failed,
-            provisional=False,
-            timeline_epoch=view.timeline_epoch,
-        )
+            for job in jobs:
+                stored = job.stored
+                if stored.view.removed:
+                    continue
+                # A re-recognition may already have replaced the same ID.
+                if any(item.view.segment_id == stored.view.segment_id and item is not stored
+                       and item.view.revision > stored.view.revision for item in session.revisions):
+                    continue
+                session.revision += 1
+                stored.translation_attempted = True
+                stored.view = replace(stored.view, revision=session.revision,
+                    german=translation.text if not translation.failed else stored.view.original,
+                    translation_language=translation.language, translation_backend=translation.backend,
+                    translation_failed=translation.failed, provisional=False, translation_group_ids=group)
 
     def _media_ms_or_fallback(
         self, session: BridgeSession, sample_index: int, fallback_ms: int
@@ -855,7 +1137,7 @@ class AsrBridgeService:
                 segments, revision = session.segments_since(query.since_revision)
                 if revision > query.since_revision:
                     break
-                if session.stream_complete and not session.busy and not session.jobs:
+                if session.stream_complete and session.idle.is_set():
                     break
                 session.wake.set()
                 time.sleep(0.05)
@@ -867,6 +1149,8 @@ class AsrBridgeService:
             language=session.language,
             progress_ms=session.progress_ms(),
             translation_backend=session.translation_backend,
+            metrics={**session.metrics, "queuedClips": len(session.jobs), "queuedTranslations": len(session.translation_jobs)},
+            warning=session.warning,
         )
 
 

@@ -61,6 +61,9 @@ def test_translation_revision_keeps_raw_and_display_source():
     result = TranscriptResult(language="zh", segments=(TranscriptSegment(text="这是", raw_text="這是", language="zh",
                               start_ms=0, end_ms=1000, start_sample=0, end_sample=16000),))
     service._publish(session, result, provisional=False)
+    service._start_worker(session)
+    assert session.idle.wait(3)
+    service._stop_worker(session)
     view = session.all_segments()[0]
     assert view.original == "这是" and view.raw_original == "這是" and view.german == "Hallo"
     assert view.to_dict()["rawOriginal"] == "這是"

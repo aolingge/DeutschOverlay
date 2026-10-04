@@ -40,6 +40,44 @@ def distance(reference, hypothesis):
     return row[-1]
 
 
+def edit_counts(reference, hypothesis):
+    """Return an optimal edit alignment, preferring matches then substitutions.
+
+    Deletions measure omitted reference units, not verified missing sentences.
+    Several equally optimal alignments may exist; the tie rule is deterministic.
+    """
+    row = [(j, 0, 0, j) for j in range(len(hypothesis) + 1)]
+    for i, token in enumerate(reference, 1):
+        new = [(i, 0, i, 0)]
+        for j, candidate in enumerate(hypothesis, 1):
+            diag, delete, insert = row[j - 1], row[j], new[-1]
+            cost = int(token != candidate)
+            choices = [(diag[0] + cost, diag[1] + cost, diag[2], diag[3]),
+                       (delete[0] + 1, delete[1], delete[2] + 1, delete[3]),
+                       (insert[0] + 1, insert[1], insert[2], insert[3] + 1)]
+            new.append(min(choices, key=lambda x: x[0]))
+        row = new
+    total, substitutions, deletions, insertions = row[-1]
+    return dict(total=total, substitutions=substitutions, deletions=deletions, insertions=insertions)
+
+
+def timing_coverage(decoded, language):
+    """Text coverage by valid word timestamps, not human-aligned accuracy."""
+    text_units, timed_units, invalid = 0, 0, 0
+    for segment in decoded:
+        text_units += len(units(segment.text, language))
+        for word in segment.words or []:
+            start = getattr(word, "start", getattr(word, "start_ms", None))
+            end = getattr(word, "end", getattr(word, "end_ms", None))
+            value = getattr(word, "word", getattr(word, "text", ""))
+            if start is None or end is None or not np.isfinite([start, end]).all() or start < 0 or end <= start:
+                invalid += 1
+            else:
+                timed_units += len(units(value, language))
+    return dict(text_units=text_units, timed_units=timed_units, invalid_words=invalid,
+                coverage=min(1.0, timed_units / text_units) if text_units else None)
+
+
 def load_audio(path, rate):
     chunks = []
     converter = av.AudioResampler(format="fltp", layout="mono", rate=rate)
@@ -60,6 +98,7 @@ def main():
     parser.add_argument("--chinese-script", choices=("raw", "simplified", "traditional"), default="raw")
     parser.add_argument("--hotwords-file", type=Path)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--input-rates", type=int, nargs="+", default=[44100, 48000], choices=(16000, 44100, 48000))
     args = parser.parse_args()
     baseline = None
     if args.baseline_pcm:
@@ -77,16 +116,18 @@ def main():
     model = WhisperModel(str(model_path), device=args.device, compute_type=compute_type, cpu_threads=4)
     engine.asr = model
     report = {"model": str(model_path), "device": args.device, "compute_type": compute_type, "cases": [],
+              "manifest_sha256": hashlib.sha256(args.manifest.read_bytes()).hexdigest(),
+              "input_rates": args.input_rates,
               "baseline_sha256": hashlib.sha256(args.baseline_pcm.read_bytes()).hexdigest() if args.baseline_pcm else None,
               "chinese_script": args.chinese_script,
               "hotwords_enabled": bool(terms),
               "current_sha256": hashlib.sha256(Path(__import__('deutsch_overlay.pcm', fromlist=['']).__file__).read_bytes()).hexdigest(),
               "limitations": ["Supplied fixtures only; no claim of real-world WER.",
-                               "Combined pipeline comparison; beam and resampling effects are not isolated.",
+                               "Optional historical pipeline comparison changes beam and resampling together; those effects are not isolated.",
                                "Whole-file decoding; no live capture, bridge segmentation or end-to-end latency measurement.",
                                "Timing confidence is not validated against human word annotations."]}
     for case in json.loads(args.manifest.read_text(encoding="utf-8-sig"))["cases"]:
-        for rate in (44100, 48000):
+        for rate in args.input_rates:
             audio = load_audio(case["audio"], rate)
             pipelines = [("after", Resampler, args.after_beam, True)]
             if baseline:
@@ -115,6 +156,9 @@ def main():
                     equivalent_ref = units(engine._normalize_chinese(case["reference"]), "zh")
                     equivalent_hyp = units(engine._normalize_chinese(raw_text), "zh")
                 item = {"id": case["id"], "kind": case.get("kind"), "language": case["language"],
+                        "corpus_language": case.get("corpus_language", case["language"]),
+                        "source_id": case.get("source_id", case["id"]),
+                        "speaker_id": case.get("speaker_id"),
                         "input_rate": rate, "pipeline": name, "beam": beam,
                         "word_timestamps": words, "reference": case["reference"], "hypothesis": text,
                         "raw_hypothesis": raw_text,
@@ -127,6 +171,9 @@ def main():
                         "seconds": time.perf_counter()-start,
                         "duration": len(signal)/16000, "words": sum(len(s.words or []) for s in decoded),
                         "audio_sha256": hashlib.sha256(Path(case["audio"]).read_bytes()).hexdigest()}
+                item["edits"] = edit_counts(equivalent_ref, equivalent_hyp)
+                item["empty_hypothesis"] = bool(equivalent_ref) and not equivalent_hyp
+                item["timing"] = timing_coverage(decoded, case["language"])
                 report["cases"].append(item)
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
