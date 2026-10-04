@@ -116,6 +116,9 @@ class BridgeSession:
     # It labels which stream a caption belongs to; it is not the page's number.
     timeline_epoch: int = 0
     language: str = "auto"
+    language_evidence: dict[str, int] = field(default_factory=dict)
+    language_confirmed: bool = False
+    last_language_clip: int | None = None
 
     # recognition
     jobs: list[ClipJob] = field(default_factory=list)
@@ -394,9 +397,18 @@ class AsrBridgeService:
             self._ingest(session, packet)
             session.last_sequence = max(session.last_sequence, packet.sequence)
             session.accepted_packets += 1
-        accepted_to = session.next_sample
         if request.stream_complete:
             session.stream_complete = True
+            if session.resampler is not None:
+                tail = session.resampler.flush()
+                self._push_audio(session, tail)
+                session.next_sample += int(tail.size)
+                session.accepted_samples += int(tail.size)
+            if session.carry.size:
+                # Only the last frame is padded for VAD. Clip coordinates and
+                # inference samples are trimmed to the real submitted duration.
+                padding = self._frame_samples - session.carry.size
+                self._push_audio(session, np.zeros(padding, dtype=np.float32), real_end=session.next_sample)
             span = self._flush_segmenter(session)
             if span is not None:
                 self._enqueue(session, span, provisional=False)
@@ -405,6 +417,7 @@ class AsrBridgeService:
             if span is not None:
                 self._enqueue(session, span, provisional=False)
         self._wake(session)
+        accepted_to = session.next_sample
         segments, revision = session.segments_since(0)
         return AudioResponse(
             accepted_samples=session.accepted_samples,
@@ -440,7 +453,7 @@ class AsrBridgeService:
         gap = 0
         if packet.sample_index > expected:
             gap = packet.sample_index - expected
-            seek = gap > int(GAP_TOLERANCE_SECONDS * session.sample_rate)
+            seek = gap > int(GAP_TOLERANCE_SECONDS * packet.sample_rate)
             session.gap_samples += gap if not seek else 0
         # A seek and a new timeline epoch are the same event from the bridge's
         # point of view: the sample counter is no longer continuous, so the
@@ -505,10 +518,8 @@ class AsrBridgeService:
                     )
                 )
 
-        if packet.sample_rate != session.sample_rate:
+        if session.resampler is None or session.resampler.in_rate != packet.sample_rate:
             session.resampler = Resampler(packet.sample_rate, session.sample_rate)
-        elif session.resampler is None:
-            session.resampler = Resampler(session.sample_rate, session.sample_rate)
         assert session.resampler is not None
 
         span = max(int(samples.size), packet.sample_index + int(samples.size) - expected)
@@ -518,7 +529,7 @@ class AsrBridgeService:
             # shrink because some audio was dropped, so the missing samples are
             # held as silence. Padding keeps every later sample on the video
             # timeline instead of pulling it forward.
-            samples = np.concatenate((samples, np.zeros(hole, dtype=samples.dtype)))
+            samples = np.concatenate((np.zeros(hole, dtype=samples.dtype), samples))
 
         resampled = session.resampler.process(samples)
         session.accepted_samples += int(resampled.size)
@@ -537,7 +548,7 @@ class AsrBridgeService:
             return 0
         return max(0, int(round(value)))
 
-    def _push_audio(self, session: BridgeSession, resampled: np.ndarray) -> None:
+    def _push_audio(self, session: BridgeSession, resampled: np.ndarray, *, real_end: int | None = None) -> None:
         """Feed newly arrived 16 kHz audio to the segmenter, one fixed frame at a time.
 
         ``frame_cursor`` tracks how far the segmenter has been fed and is always
@@ -566,6 +577,12 @@ class AsrBridgeService:
         for index in range(complete):
             frame = session.carry[index * frame_samples : (index + 1) * frame_samples]
             for span in segmenter.push_positioned(frame):
+                if real_end is not None:
+                    end = min(span.end_sample, real_end)
+                    if end <= span.start_sample:
+                        continue
+                    span = SpeechSpan(span.samples[:end - span.start_sample], span.start_sample, end,
+                                      overlap=span.overlap, forced_cut=span.forced_cut)
                 self._enqueue(session, span, provisional=False)
         consumed = complete * frame_samples
         session.carry = session.carry[consumed:].copy()
@@ -597,6 +614,10 @@ class AsrBridgeService:
         with session.job_lock:
             session.jobs = []
         session.stream_complete = False
+        session.language = session.request.source_language
+        session.language_evidence.clear()
+        session.language_confirmed = False
+        session.last_language_clip = None
 
     def _snapshot(self, session: BridgeSession) -> SpeechSpan | None:
         segmenter = session._segmenter
@@ -618,7 +639,14 @@ class AsrBridgeService:
         segmenter = session._segmenter
         if segmenter is None:
             return None
-        return segmenter.flush_positioned()
+        span = segmenter.flush_positioned()
+        if span is None:
+            return None
+        end = min(span.end_sample, session.next_sample)
+        if end <= span.start_sample:
+            return None
+        return SpeechSpan(span.samples[:end - span.start_sample], span.start_sample, end,
+                          overlap=span.overlap, forced_cut=span.forced_cut)
 
     def _enqueue(self, session: BridgeSession, span: SpeechSpan, *, provisional: bool) -> None:
         with session.job_lock:
@@ -676,19 +704,43 @@ class AsrBridgeService:
         session.idle.set()
 
     def _run_job(self, session: BridgeSession, job: ClipJob) -> None:
+        explicit = session.request.source_language not in ("auto", "")
+        language = session.request.source_language if explicit else (
+            session.language if session.language_confirmed else None
+        )
         result = self.engine.transcribe_segments(
             job.span.samples,
-            language=None if job.language in ("auto", "") else job.language,
+            language=language,
             offset_samples=job.span.start_sample,
-            word_timestamps=False,
+            word_timestamps=not job.provisional,
+            beam_size=3,
         )
+        if job.epoch != session.timeline_epoch:
+            return
         if not result.segments:
             return
         if result.warning:
             session.warning = result.warning
-        if result.language:
+        if explicit:
+            session.language = session.request.source_language
+        elif (not job.provisional and result.language and
+              result.language_probability is not None and
+              np.isfinite(result.language_probability) and result.language_probability >= 0.8 and
+              job.span.duration_samples >= 2 * RECOGNIZER_SAMPLE_RATE and
+              session.last_language_clip != job.span.start_sample and not session.language_confirmed):
+            # Two independent final utterances avoid locking a whole video to
+            # a low-confidence first fragment. These are project thresholds.
+            session.last_language_clip = job.span.start_sample
+            session.language_evidence = {result.language: session.language_evidence.get(result.language, 0) + 1}
+            if session.language_evidence[result.language] >= 2:
+                session.language_confirmed = True
+                session.language = result.language
+        elif session.language_confirmed:
             session.language = result.language
-        self._publish(session, result, provisional=job.provisional, epoch=job.epoch)
+        self._publish(
+            session, result, provisional=job.provisional, epoch=job.epoch,
+            clip_start_sample=job.span.start_sample,
+        )
 
     def _publish(
         self,
@@ -697,6 +749,7 @@ class AsrBridgeService:
         *,
         provisional: bool,
         epoch: int | None = None,
+        clip_start_sample: int | None = None,
     ) -> None:
         language = result.language or session.language
         for index, segment in enumerate(result.segments):
@@ -713,7 +766,11 @@ class AsrBridgeService:
             with session.store_lock:
                 session.revision += 1
                 revision = session.revision
-            identifier = f"{session.session_id[:8]}-{start_sample}-{index}"
+            # Model refinements may move a sentence's start. Its identity is
+            # the input clip/slot, while its timing follows the model revision.
+            origin = start_sample if clip_start_sample is None else clip_start_sample
+            stream_epoch = session.timeline_epoch if epoch is None else epoch
+            identifier = f"{session.session_id[:8]}-{stream_epoch}-{origin}-{index}"
             view = SegmentView(
                 segment_id=identifier,
                 revision=revision,
@@ -724,7 +781,12 @@ class AsrBridgeService:
                 end_ms=end_ms,
                 start_sample=start_sample,
                 end_sample=end_sample,
-                words=tuple(word.to_dict() for word in segment.words),
+                words=tuple({**word.to_dict(),
+                    "startMs": self._media_ms_or_fallback(session, word.start_sample, word.start_ms)
+                        if word.start_sample is not None else start_ms + word.start_ms - segment.start_ms,
+                    "endMs": self._media_ms_or_fallback(session, word.end_sample, word.end_ms)
+                        if word.end_sample is not None else start_ms + word.end_ms - segment.start_ms,
+                } for word in segment.words),
                 provisional=provisional,
                 # The stream a caption belongs to is the one its audio came
                 # from, not whichever stream is current by the time the worker

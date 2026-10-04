@@ -420,16 +420,20 @@ class PositionedSpeechSegmenter(SpeechSegmenter):
     @property
     def utterance_start_sample(self) -> int:
         """Stream position of the first sample of the current utterance."""
-        return self._start
+        return self._consumed - len(self._frames) * self.frame_samples
 
     @property
     def buffered_samples(self) -> int:
         """Audio the segmenter is holding: the current utterance plus preroll."""
-        return len(self._positions) * self.frame_samples
+        return (len(self._frames) + len(self._preroll)) * self.frame_samples
 
     def reset(self) -> None:
         """Discard the current utterance and restart position accounting."""
         super().flush()
+        self._preroll.clear()
+        reset_detector = getattr(self.voice_detector, "reset", None)
+        if callable(reset_detector):
+            reset_detector()
         self._positions = []
         self._consumed = 0
         self._start = 0
@@ -454,9 +458,9 @@ class PositionedSpeechSegmenter(SpeechSegmenter):
         spans: list[SpeechSpan] = []
         for clip in clips:
             # The base class keeps an overlap tail after a forced cut, so the
-            # clip no longer starts at the oldest buffered frame - read that
-            # frame's own position instead of reusing the first one forever.
-            start = self._positions[0]
+            # clip ends at the current input position. Its exact length also
+            # accounts for preroll and retained overlap frames.
+            start = self._consumed - int(clip.size)
             remaining = len(self._positions) - len(self._frames)
             self._positions = self._positions[remaining:] if (self._frames and remaining > 0) else []
             self._start = start
@@ -467,7 +471,7 @@ class PositionedSpeechSegmenter(SpeechSegmenter):
                     start_sample=start,
                     end_sample=end,
                     overlap=start < self._last_end and self._has_emitted,
-                    forced_cut=True,
+                    forced_cut=bool(self._frames),
                 )
             )
             self._last_end = end
@@ -476,7 +480,7 @@ class PositionedSpeechSegmenter(SpeechSegmenter):
 
     def flush_positioned(self) -> SpeechSpan | None:
         clip = self.flush()
-        start = self._positions[0] if self._positions else self._start
+        start = self._consumed - (0 if clip is None else int(clip.size))
         self._positions = []
         self._start = self._consumed
         if clip is None:
@@ -492,4 +496,3 @@ class PositionedSpeechSegmenter(SpeechSegmenter):
         self._last_end = end
         self._has_emitted = True
         return span
-

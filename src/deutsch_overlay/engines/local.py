@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import math
 from pathlib import Path
 
 import numpy as np
@@ -49,7 +50,7 @@ def _optional_number(value):
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        return float(value) if math.isfinite(value) else None
     return None
 
 
@@ -133,7 +134,10 @@ class LocalEngine:
         """Everything the recognizer accepts, in one place, so both APIs agree."""
         if sample_rate != SAMPLE_RATE or audio.ndim != 1:
             raise ValueError("local engine needs 16 kHz mono audio")
-        return np.asarray(audio, dtype=np.float32)
+        prepared = np.asarray(audio, dtype=np.float32)
+        if not np.isfinite(prepared).all():
+            raise ValueError("audio contains non-finite samples")
+        return np.clip(prepared, -1.0, 1.0)
 
     def transcribe_segments(
         self,
@@ -155,6 +159,8 @@ class LocalEngine:
         consumer place a caption on the video timeline.
         """
         prepared = self.check_audio(audio, SAMPLE_RATE)
+        if offset_samples is not None and offset_samples < 0:
+            raise ValueError("offset_samples must not be negative")
         if prepared.size == 0:
             return TranscriptResult(language=language or "")
         segments, info = self._transcribe(
@@ -164,6 +170,7 @@ class LocalEngine:
             beam_size=beam_size,
             condition_on_previous_text=False,
             word_timestamps=word_timestamps,
+            hallucination_silence_threshold=1.0 if word_timestamps else None,
         )
         detected = language or getattr(info, "language", "") or ""
         offset = offset_samples
@@ -174,20 +181,26 @@ class LocalEngine:
             text = (getattr(segment, "text", "") or "").strip()
             if not text:
                 continue
-            start_ms = int(round(float(getattr(segment, "start", 0.0) or 0.0) * 1000))
-            end_ms = int(round(float(getattr(segment, "end", 0.0) or 0.0) * 1000))
-            if end_ms < start_ms:
-                end_ms = start_ms
+            start = _optional_number(getattr(segment, "start", 0.0))
+            end = _optional_number(getattr(segment, "end", 0.0))
+            if start is None or end is None or start < 0 or end < start or start > prepared.size / SAMPLE_RATE:
+                continue
+            start_ms = int(round(start * 1000))
+            end_ms = int(round(min(end, prepared.size / SAMPLE_RATE) * 1000))
             converted.append(
                 TranscriptSegment(
                     text=text,
                     language=detected,
                     start_ms=start_ms,
                     end_ms=end_ms,
-                    start_sample=None if offset is None else offset,
-                    end_sample=None if offset is None else offset + prepared.size,
+                    start_sample=(None if offset is None else offset + min(
+                        prepared.size, max(0, round(start_ms * SAMPLE_RATE / 1000))
+                    )),
+                    end_sample=(None if offset is None else offset + min(
+                        prepared.size, max(0, round(end_ms * SAMPLE_RATE / 1000))
+                    )),
                     words=(
-                        self._convert_words(segment, offset)
+                        self._convert_words(segment, offset, start_ms, end_ms)
                         if word_timestamps
                         else ()
                     ),
@@ -219,23 +232,30 @@ class LocalEngine:
         )
 
     @staticmethod
-    def _convert_words(segment, offset: int | None) -> tuple[TranscriptWord, ...]:
+    def _convert_words(segment, offset: int | None, segment_start: int, segment_end: int) -> tuple[TranscriptWord, ...]:
         words: list[TranscriptWord] = []
         for word in getattr(segment, "words", None) or ():
             text = (getattr(word, "word", "") or "").strip()
             if not text:
                 continue
-            start_ms = int(round(float(getattr(word, "start", 0.0) or 0.0) * 1000))
-            end_ms = int(round(float(getattr(word, "end", 0.0) or 0.0) * 1000))
-            if end_ms < start_ms:
-                end_ms = start_ms
+            start = _optional_number(getattr(word, "start", None))
+            end = _optional_number(getattr(word, "end", None))
+            if start is None or end is None or start < 0 or end <= start:
+                continue
+            start_ms, end_ms = round(start * 1000), round(end * 1000)
+            if start_ms < segment_start or end_ms > segment_end or (words and start_ms < words[-1].end_ms):
+                continue
             words.append(
                 TranscriptWord(
                     text=text,
                     start_ms=start_ms,
                     end_ms=end_ms,
-                    start_sample=offset,
-                    end_sample=None if offset is None else offset + 1,
+                    start_sample=(None if offset is None else offset + max(
+                        0, round(start_ms * SAMPLE_RATE / 1000)
+                    )),
+                    end_sample=(None if offset is None else offset + max(
+                        0, round(end_ms * SAMPLE_RATE / 1000)
+                    )),
                     probability=_optional_number(getattr(word, "probability", None)),
                 )
             )

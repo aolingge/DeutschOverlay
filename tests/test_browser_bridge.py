@@ -147,7 +147,9 @@ class PreparedEngine:
 
     def __init__(self, asr=None, translators=None, **kw):
         self.inner = LocalEngine(
-            asr=asr or FakeAsr(), translators=translators or {}, prefer_gpu=False, **kw
+            asr=asr or FakeAsr(),
+            translators=translators if translators is not None else {"en": FakeTranslator(), "zh": FakeTranslator()},
+            prefer_gpu=False, **kw
         )
         self.prepare_calls = 0
 
@@ -291,11 +293,12 @@ def test_resampler_output_count_is_exact_across_chunking():
         for chunk in (160, 1000, 4096, 16000):
             source = tone(1.0, rate=rate)
             single = Resampler(rate, 16000)
-            whole = single.process(source)
+            whole = np.concatenate((single.process(source), single.flush()))
             streamed = Resampler(rate, 16000)
             blocks = []
             for offset in range(0, len(source), chunk):
                 blocks.append(streamed.process(source[offset : offset + chunk]))
+            blocks.append(streamed.flush())
             joined = np.concatenate(blocks)
             assert joined.size == whole.size == single.expected_output_total(rate)
             assert np.allclose(joined, whole, atol=1e-6)
@@ -368,6 +371,27 @@ def test_transcribe_segments_keeps_word_times_when_requested():
     assert result.segments[0].has_model_words
 
 
+def test_each_model_sentence_and_word_keeps_its_own_absolute_sample_window():
+    class SplitAsr:
+        def transcribe(self, audio, **options):
+            return [SimpleNamespace(text='Hallo', start=0.2, end=0.8,
+                                    words=[SimpleNamespace(word='Hallo', start=0.25, end=0.7)]),
+                    SimpleNamespace(text='Welt', start=1.1, end=1.6, words=[])], FakeInfoForSplit()
+
+    class FakeInfoForSplit:
+        language = 'de'
+
+    engine = make_engine(asr=SplitAsr())
+    result = engine.transcribe_segments(tone(2.0), offset_samples=32000, word_timestamps=True)
+    assert [(s.start_sample, s.end_sample) for s in result.segments] == [(35200, 44800), (49600, 57600)]
+    word = result.segments[0].words[0]
+    assert (word.start_sample, word.end_sample) == (36000, 43200)
+    timeline = AudioTimeline()
+    timeline.add_anchor(TimelineAnchor(sample_index=32000, audio_start_ms=60000, observed_at=0))
+    assert [(timeline.media_ms(s.start_sample), timeline.media_ms(s.end_sample))
+            for s in result.segments] == [(60200, 60800), (61100, 61600)]
+
+
 def test_transcribe_audio_reports_no_translation():
     engine = make_engine(asr=FakeAsr(text="Bonjour", language="en"))
     result = engine.transcribe_audio(tone(1.0))
@@ -404,6 +428,29 @@ def make_service(**kwargs):
     if engine is None:
         engine = PreparedEngine(**kwargs.pop("engine_kwargs", {}))
     return AsrBridgeService(engine, **kwargs)
+
+
+def test_model_timing_refinement_revises_same_clip_slot_and_epoch_ids_do_not_collide():
+    service = make_service()
+    response = service.create_session(
+        SessionRequest.from_dict(new_session_payload(sourceLanguage="de", audioStartMs=60000))
+    )
+    session = service.get(response.session_id)
+    def publish(first_sample, revision_epoch=0):
+        result = TranscriptResult(language='de', segments=(TranscriptSegment(
+            text='Hallo', language='de', start_ms=first_sample // 16, end_ms=800,
+            start_sample=first_sample, end_sample=12800),))
+        service._publish(session, result, provisional=True, epoch=revision_epoch, clip_start_sample=0)
+    publish(3200)
+    first = session.all_segments()[0]
+    publish(4000)
+    latest = session.all_segments()
+    assert len(latest) == 1
+    assert latest[0].segment_id == first.segment_id
+    assert latest[0].start_ms == 60250
+    publish(4000, revision_epoch=1)
+    assert len(session.all_segments()) == 2
+    service.close_session(session.session_id)
 
 
 def test_captions_present_never_starts_recognition():
