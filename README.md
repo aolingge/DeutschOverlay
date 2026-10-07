@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/aolingge/aolingge/main/assets/language-cover.png" alt="语言学习主题装饰插画" width="100%" />
+</p>
+
 # Deutsch Overlay
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -8,6 +12,15 @@
 Windows 11 上的德语实时字幕条。它识别电脑正在播放的声音：德语直接显示德语；英语和中文翻译成德语。适合无边框全屏游戏和普通视频。
 
 ![德语单行与中德双语字幕条](docs/assets/windows-overlay-bilingual.png)
+
+## 项目速览
+
+| 项目 | 说明 |
+| --- | --- |
+| **适合谁** | 想在 Windows 11 看视频或玩无边框全屏游戏时接触德语的学习者。 |
+| **处理什么** | 捕获电脑播放声：德语显示原文，英语或中文翻译为德语，可显示单行或双语字幕。 |
+| **使用方式** | 下载完整发布包，选择播放设备，调整字幕位置与外观；本地模式可离线使用，Azure 在线模式可选。 |
+| **直接开始** | [下载与安装](#下载与安装) · [使用说明](#使用) · [本地与在线模式](#本地与在线模式) |
 
 ## 下载与安装
 
