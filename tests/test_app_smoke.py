@@ -354,8 +354,11 @@ def test_hidden_caption_does_not_return_after_its_display_time_expires(qapp, tmp
         runtime.shutdown()
 
 
-def test_restored_caption_keeps_only_its_remaining_display_time(qapp, tmp_path):
-    from PySide6.QtTest import QTest
+def test_restored_caption_keeps_only_its_remaining_display_time(qapp, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    clock = [100.0]
+    monkeypatch.setattr("deutsch_overlay.app.time", SimpleNamespace(monotonic=lambda: clock[0]))
 
     path = tmp_path / "settings.json"
     save_settings(path, Settings(fade_seconds=0.16))
@@ -367,10 +370,12 @@ def test_restored_caption_keeps_only_its_remaining_display_time(qapp, tmp_path):
         view = CaptionView(1, "caption", "Guten Tag", None, True, 1.0)
         runtime._show_view(view)
         runtime.toggle_visibility()
-        QTest.qWait(100)
+        clock[0] += 0.10
         runtime.toggle_visibility()
         assert runtime.overlay.isVisible()
-        QTest.qWait(90)
+        assert runtime.overlay._hide_timer.interval() == 60
+        clock[0] += 0.07
+        runtime.overlay._hide_timer.timeout.emit()
         assert not runtime.overlay.isVisible()
         runtime._show_view(view)  # The same segment may be re-rendered when comparison changes.
         assert not runtime.overlay.isVisible()

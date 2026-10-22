@@ -38,6 +38,18 @@ class FakeLocalEngine:
         return CaptionEvent(session, segment, "de", "Guten Tag", None, True, time.monotonic())
 
 
+def wait_for_online_worker(controller, *, views=None):
+    deadline = time.monotonic() + 5.0
+    while controller.running and time.monotonic() < deadline:
+        QApplication.processEvents()
+        # 显式让出 Python 线程时间，避免 Windows 的 Qt 等待饿死工作线程。
+        time.sleep(0.01)
+    QApplication.processEvents()
+    assert not controller.running, "online worker did not finish within five seconds"
+    if views is not None:
+        assert views, "online worker finished without delivering a caption"
+
+
 def speech_frames():
     voice = np.full(1600, 0.2, dtype=np.float32)
     silence = np.zeros(1600, dtype=np.float32)
@@ -590,10 +602,7 @@ def test_online_idle_disconnects_then_new_sound_starts_fresh_session(qapp):
     controller = CaptionController(source_factory=lambda _device: source, online_factory=make_engine)
     try:
         assert controller.start(replace(Settings(), mode="online"))
-        for _ in range(50):
-            QTest.qWait(20)
-            if not controller.running:
-                break
+        wait_for_online_worker(controller)
         assert len(engines) == 2
         assert engines[0].starts == engines[1].starts == 1
         assert engines[0].frames == 1 + CaptionController.ONLINE_IDLE_FRAMES
@@ -631,10 +640,7 @@ def test_online_idle_delivers_final_caption_from_graceful_finish(qapp):
     controller.view_changed.connect(views.append)
     try:
         assert controller.start(replace(Settings(), mode="online"))
-        for _ in range(50):
-            QTest.qWait(20)
-            if not controller.running and views:
-                break
+        wait_for_online_worker(controller, views=views)
         assert [view.primary for view in views] == ["Guten Tag"]
     finally:
         controller.stop()
